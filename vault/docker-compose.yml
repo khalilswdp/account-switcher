@@ -13,7 +13,7 @@ services:
     environment:
       VAULT_LOCAL_CONFIG: |
         {
-          "ui": false,
+          "ui": true,
           "disable_mlock": true,
           "storage": { "raft": { "path": "/vault/file", "node_id": "claude-switcher-local" } },
           "listener": { "tcp": { "address": "0.0.0.0:8200", "tls_disable": true } },
