@@ -436,24 +436,13 @@ function renderOverview() {
   if (!setup.hidden) {
     const found = d.detected;
     $('#setup-detected').textContent = found
-      ? `The app's data matches "${labelOf(found.account)}": Claude Code is signed in there as ${found.email}. It is being recorded as that account.`
+      ? `The app's data matches "${labelOf(found.account)}": Claude Code is signed in there as ${found.email}. Confirm it below, or pick another account.`
       : '';
-    $('#setup-accounts').replaceChildren(...state.accounts.map((a) =>
-      button(a.label, found?.account === a.id ? 'btn btn-primary' : 'btn btn-outline', () => initDesktop(a), { disabled: Boolean(busy[a.id]) })));
+    $('#setup-accounts').replaceChildren(...state.accounts.map((a) => {
+      const suggested = found?.account === a.id;
+      return button(suggested ? `Yes, it is "${a.label}"` : a.label, suggested ? 'btn btn-primary' : 'btn btn-outline', () => initDesktop(a), { disabled: Boolean(busy[a.id]) });
+    }));
   }
-}
-
-// The one-time setup without a click, when the server could tell which account the app's data
-// belongs to (its id matches one local Claude Code login). Tried once per page load.
-let autoSetupTried = false;
-async function autoSetup() {
-  const d = state.desktop;
-  if (autoSetupTried || !d?.supported || d.active || !d.detected) return;
-  autoSetupTried = true;
-  const a = state.accounts.find((x) => x.id === d.detected.account);
-  if (!a) return;
-  await act(a, 'Recording the Claude app\'s account, worked out from its data…', () => post(`/api/desktop/init/${encodeURIComponent(a.id)}`),
-    () => `The Claude app is tracked as this account: its data matches the Claude Code login ${d.detected.email}`);
 }
 
 function renderVaultOnly() {
@@ -725,7 +714,9 @@ async function newDesktop(a) {
 async function initDesktop(a) {
   if (!(await ask({
     title: `Is the Claude app signed in as "${a.label}" right now?`,
-    lines: ['This records that the app\'s current data belongs to that account. Nothing is moved or changed, so pick the account the app really shows.'],
+    lines: state.desktop?.detected?.account === a.id
+      ? [`The app's data names the same Anthropic account as this account's Claude Code login (${state.desktop.detected.email}).`, 'This records that the app\'s current data belongs to it. Nothing is moved or changed.']
+      : ['This records that the app\'s current data belongs to that account. Nothing is moved or changed, so pick the account the app really shows.'],
     ok: 'Yes, it is',
   }))) return;
   await act(a, 'Recording the Claude app\'s account…', () => post(`/api/desktop/init/${encodeURIComponent(a.id)}`), () => 'Done: the Claude app is tracked as this account');
@@ -1001,7 +992,6 @@ async function refresh() {
       }
     }
     render();
-    autoSetup();
   } catch (e) {
     // An old server (started before this page existed) has no /api/state: say so instead of showing nothing.
     if (/not found|older than/i.test(e.message)) {

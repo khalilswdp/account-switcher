@@ -116,8 +116,9 @@ it from there. When the app's data folder is not assigned yet, the page asks "wh
 app signed in as right now?" (`POST /api/desktop/init/:id`), unless the server could tell: the app's
 `config.json` holds `lastKnownAccountUuid`, Claude Code's `.claude.json` (next to the default folder, inside
 any other) holds `oauthAccount.accountUuid` for each local login, and exactly one match is reported as
-`desktop.detected` in `/api/state` (account and masked email); the page then records it on its own
-(`autoSetup`, once per load) and says so in the activity log. `init` moves and quits nothing, so it is
+`desktop.detected` in `/api/state` (account and masked email); the page then shows the evidence and
+pre-selects that account, and records nothing until the person confirms it (changed 2026-11-04 from
+recording it on its own, so that the page never acts unasked). `init` moves and quits nothing, so it is
 allowed from inside the app. An account with no app data gets "Sign in
 via the app…" (`POST /api/desktop/new/:id`: parks the current data, reopens the app signed out). An
 account that exists only in the Vault is listed with "Add to this Mac/PC" (`POST /api/vault/add?account=`,
