@@ -576,19 +576,52 @@ function runWithStdin(script, args, input, timeoutMs) {
 async function backupAccount(id, folder, passphrase) {
   if (typeof passphrase !== 'string' || passphrase.length < 12) throw httpError(400, 'the passphrase must be at least 12 characters');
   if (typeof folder !== 'string' || !folder.trim()) throw httpError(400, 'choose a folder for the backup file');
-  if (vaulting) throw httpError(409, 'A Vault save, load or backup is already in progress');
-  vaulting = true; // one at a time: the login reads can show Keychain prompts
+  return runBackupTool(['backup', id, '--to', folder.trim()], passphrase);
+}
+
+// One backup operation at a time (the login reads can show Keychain prompts). The tool prints one
+// line of JSON on success and "Error: ..." on failure.
+async function runBackupTool(args, passphrase) {
+  if (typeof passphrase !== 'string' || !passphrase) throw httpError(400, 'enter the passphrase');
+  if (vaulting) throw httpError(409, 'A Vault save, load, backup or restore is already in progress');
+  vaulting = true;
   try {
-    const r = await runWithStdin('backup.mjs', ['backup', id, '--to', folder.trim()], `${passphrase}\n`, 15 * 60_000);
+    const r = await runWithStdin('backup.mjs', args, `${passphrase}\n`, 15 * 60_000);
     if (r.code !== 0) {
       const line = r.err.split('\n').find((l) => l.startsWith('Error:'));
-      throw httpError(500, line ? line.replace(/^Error:\s*/, '') : 'the backup did not finish (timed out or was stopped)');
+      throw httpError(500, line ? line.replace(/^Error:\s*/, '') : 'it did not finish (timed out or was stopped)');
     }
     return JSON.parse(r.out.trim().split('\n').pop());
   } finally {
     vaulting = false;
   }
 }
+
+// Backup files in a folder: names, sizes and times only.
+async function listBackups(folder) {
+  if (!folder.trim()) throw httpError(400, 'choose a folder');
+  const f = folder.trim();
+  const dir = f === '~' ? os.homedir() : f.startsWith('~/') ? path.join(os.homedir(), f.slice(2)) : path.resolve(f);
+  let names;
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    throw httpError(404, `no such folder: ${dir}`);
+  }
+  const files = [];
+  for (const name of names.filter((n) => /^claude-backup-.+\.csbk$/.test(n))) {
+    const st = await fs.stat(path.join(dir, name));
+    files.push({ name, path: path.join(dir, name), bytes: st.size, modified: st.mtime.toISOString() });
+  }
+  files.sort((a, b) => b.modified.localeCompare(a.modified));
+  return { folder: dir, files };
+}
+
+const RESTORE_PARTS = ['vault', 'config', 'desktop'];
+const backupFile = (file) => {
+  if (typeof file !== 'string' || !file.endsWith('.csbk')) throw httpError(400, 'choose a backup file (.csbk)');
+  return file;
+};
 
 // -------------------------------------------------------------------- API
 
@@ -686,6 +719,17 @@ app.post('/api/vault/load', async (req, res) => {
 app.post('/api/accounts/:id/backup', express.json({ limit: '16kb' }), async (req, res) =>
   res.json(await backupAccount(req.params.id, req.body?.folder, req.body?.passphrase)),
 );
+app.get('/api/backups', async (req, res) => res.json(await listBackups(String(req.query.folder ?? ''))));
+app.post('/api/backup/inspect', express.json({ limit: '16kb' }), async (req, res) =>
+  res.json(await runBackupTool(['inspect', backupFile(req.body?.file)], req.body?.passphrase)),
+);
+app.post('/api/backup/restore', express.json({ limit: '16kb' }), async (req, res) => {
+  const { file, passphrase, parts, replaceVault } = req.body ?? {};
+  if (!Array.isArray(parts) || !parts.length || parts.some((p) => !RESTORE_PARTS.includes(p))) {
+    throw httpError(400, `choose what to restore: ${RESTORE_PARTS.join(', ')}`);
+  }
+  res.json(await runBackupTool(['apply', backupFile(file), '--parts', parts.join(','), ...(replaceVault ? ['--replace-vault'] : [])], passphrase));
+});
 app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
 app.post('/api/accounts/:id/reset', async (req, res) => res.json(await resetProfile(req.params.id)));
 

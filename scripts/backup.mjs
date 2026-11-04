@@ -5,6 +5,12 @@
 //   node scripts/backup.mjs verify <file>                     check it opens and show what is inside
 //   node scripts/backup.mjs restore <file> --out <folder> [--to-vault] [--force]
 //                                                             unpack it (and optionally put the logins back in the Vault)
+//   node scripts/backup.mjs inspect <file>                    describe it as one line of JSON (for the dashboard)
+//   node scripts/backup.mjs apply <file> --parts vault,config,desktop [--replace-vault]
+//                                                             put chosen parts back where they belong. It only ADDS what
+//                                                             is missing: nothing existing is overwritten or deleted
+//                                                             (config -> the account's Claude Code folder, desktop ->
+//                                                             Claude.<name>, vault -> the Vault)
 //
 // What goes in (everything that cannot be re-downloaded):
 //   vault/            the three logins (desktop cookie, browser session, CLI login) in exactly the format
@@ -26,7 +32,7 @@ import { createReadStream, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from 'node:crypto';
 import { promisify } from 'node:util';
 import { fail, provider } from './lib/vault-client.mjs';
@@ -145,8 +151,13 @@ function tarFrom(stream, args) {
   tar.stdout.on('data', (d) => (out += d));
   tar.stderr.on('data', (d) => (err += d));
   stream.pipe(tar.stdin);
-  tar.stdin.on('error', () => {});
-  return new Promise((resolve) => tar.on('close', (code) => resolve({ code, out, err })));
+  tar.stdin.on('error', () => {}); // tar may stop reading early (-q): that is fine
+  return new Promise((resolve) =>
+    tar.on('close', (code) => {
+      stream.destroy();
+      resolve({ code, out, err });
+    }),
+  );
 }
 
 // ----------------------------------------------------------------------- backup
@@ -315,25 +326,136 @@ async function restore(file, outArg, toVault, force) {
   console.log(`Unpacked into ${out}.`);
 
   if (toVault) {
-    const root = path.join(out, 'vault');
-    let n = 0;
-    const walk = async (dir, prefix) => {
-      for (const e of await fs.readdir(dir, { withFileTypes: true })) {
-        if (e.isDirectory()) await walk(path.join(dir, e.name), `${prefix}${e.name}/`);
-        else if (e.name.endsWith('.json')) {
-          const id = `${prefix}${e.name.replace(/\.json$/, '')}`;
-          if (!force && (await provider().read(id))) {
-            console.log(`  kept the Vault's existing entry for ${id} (use --force to replace it)`);
-          } else {
-            await provider().write(id, await fs.readFile(path.join(dir, e.name), 'utf8'));
-            n++;
-            console.log(`  put ${id} into the Vault`);
-          }
+    const { written } = await putVault(path.join(out, 'vault'), force, (line) => console.log(`  ${line}`));
+    console.log(`${written} login(s) written to the Vault. Use the dashboard's "From the Vault" buttons to load them.`);
+  }
+}
+
+// Puts the login entries of an unpacked backup into the Vault. An existing entry is kept unless replace.
+async function putVault(root, replace, say = () => {}) {
+  const result = { written: 0, kept: 0 };
+  const walk = async (dir, prefix) => {
+    for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) await walk(path.join(dir, e.name), `${prefix}${e.name}/`);
+      else if (e.name.endsWith('.json')) {
+        const id = `${prefix}${e.name.replace(/\.json$/, '')}`;
+        if (!replace && (await provider().read(id))) {
+          result.kept++;
+          say(`kept the Vault's existing entry for ${id} (use --force to replace it)`);
+        } else {
+          await provider().write(id, await fs.readFile(path.join(dir, e.name), 'utf8'));
+          result.written++;
+          say(`put ${id} into the Vault`);
         }
       }
-    };
-    if (await exists(root)) await walk(root, '');
-    console.log(`${n} login(s) written to the Vault. Use the dashboard's "From the Vault" buttons to load them.`);
+    }
+  };
+  if (await exists(root)) await walk(root, '');
+  return result;
+}
+
+// Copies every file of src into dst that dst does not have yet. Nothing is overwritten or deleted,
+// and modification times are kept (Claude Code sorts its history by them).
+async function copyMissing(src, dst) {
+  const r = { copied: 0, skipped: 0, target: dst };
+  const walk = async (from, to) => {
+    await fs.mkdir(to, { recursive: true, mode: 0o700 });
+    for (const e of await fs.readdir(from, { withFileTypes: true })) {
+      const a = path.join(from, e.name);
+      const b = path.join(to, e.name);
+      if (e.isDirectory()) await walk(a, b);
+      else if (e.isFile()) {
+        if (await fs.lstat(b).then(() => true, () => false)) {
+          r.skipped++;
+        } else {
+          await fs.copyFile(a, b);
+          const st = await fs.stat(a);
+          await fs.utimes(b, st.atime, st.mtime);
+          r.copied++;
+        }
+      }
+    }
+  };
+  if (await exists(src)) await walk(src, dst);
+  return r;
+}
+
+const appRunning = () =>
+  !process.env.SWAP_SKIP_RUNNING_CHECK && spawnSync('pgrep', ['-f', '/Applications/Claude.app/Contents/']).status === 0;
+
+// Opens a backup and describes it as one line of JSON (no secret values), for the dashboard.
+async function inspect(file) {
+  if (!file) fail('usage: inspect <file>');
+  if (!(await exists(file))) fail(`no such file: ${file}`);
+  const passphrase = await readPassphrase({ confirm: false });
+  await authenticate(file, passphrase);
+  const list = await tarFrom(await decryptedStream(file, passphrase), ['-tzf', '-']);
+  const names = list.out.split('\n').filter(Boolean);
+  const manifest = await tarFrom(await decryptedStream(file, passphrase), ['-xzOqf', '-', 'manifest.json']);
+  let m;
+  try {
+    m = JSON.parse(manifest.out);
+  } catch {
+    fail('this backup has no readable manifest');
+  }
+  console.log(JSON.stringify({
+    ok: true,
+    account: m.account,
+    createdAt: m.createdAt,
+    host: m.host,
+    logins: m.logins,
+    notes: m.notes ?? [],
+    vault: names.filter((n) => /^vault\/.+\.json$/.test(n)).map((n) => n.replace(/^vault\//, '').replace(/\.json$/, '')),
+    hasConfig: names.some((n) => n.startsWith('claude-config/')),
+    hasDesktop: names.some((n) => n.startsWith('desktop-data/')),
+  }));
+}
+
+// Puts chosen parts of a backup back where they belong. Only adds what is missing.
+async function apply(file, partsArg, replaceVault) {
+  const parts = new Set((partsArg ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+  if (!parts.size || [...parts].some((p) => !['vault', 'config', 'desktop'].includes(p))) {
+    fail('usage: apply <file> --parts vault,config,desktop [--replace-vault]');
+  }
+  if (!file || !(await exists(file))) fail(`no such file: ${file}`);
+  const passphrase = await readPassphrase({ confirm: false });
+  await authenticate(file, passphrase); // nothing is written until the file is known to be intact
+
+  const stage = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-restore-'));
+  try {
+    const wanted = ['manifest.json'];
+    if (parts.has('vault')) wanted.push('vault');
+    if (parts.has('config')) wanted.push('claude-config', 'claude.json');
+    if (parts.has('desktop')) wanted.push('desktop-data');
+    const r = await tarFrom(await decryptedStream(file, passphrase), ['-xzf', '-', '-C', stage, ...wanted]);
+    if (r.code > 1) fail(`could not unpack: ${r.err.trim().split('\n')[0]}`);
+    const name = JSON.parse(await fs.readFile(path.join(stage, 'manifest.json'), 'utf8')).account;
+    if (!/^[\w-]+$/.test(name ?? '')) fail('the backup names no valid account');
+
+    const result = {};
+    if (parts.has('desktop')) { // check before writing anything
+      if (activeName() === name && appRunning()) fail('the Claude app is running on this account. Quit it (Cmd+Q) and try again.');
+    }
+    if (parts.has('vault')) result.vault = await putVault(path.join(stage, 'vault'), replaceVault);
+    if (parts.has('config')) {
+      const target = configDirOf(name);
+      result.config = await copyMissing(path.join(stage, 'claude-config'), target);
+      const home = path.join(os.homedir(), '.claude.json');
+      if (target === path.join(os.homedir(), '.claude') && (await exists(path.join(stage, 'claude.json')))) {
+        if (await exists(home)) result.config.skipped++;
+        else {
+          await fs.copyFile(path.join(stage, 'claude.json'), home);
+          result.config.copied++;
+        }
+      }
+    }
+    if (parts.has('desktop')) {
+      const target = activeName() === name ? path.join(SUPPORT, 'Claude') : path.join(SUPPORT, `Claude.${name}`);
+      result.desktop = await copyMissing(path.join(stage, 'desktop-data'), target);
+    }
+    console.log(JSON.stringify({ ok: true, account: name, parts: result }));
+  } finally {
+    await fs.rm(stage, { recursive: true, force: true });
   }
 }
 
@@ -343,7 +465,9 @@ try {
   if (cmd === 'backup') await backup(arg, opt('--to'));
   else if (cmd === 'verify') await verify(arg);
   else if (cmd === 'restore') await restore(arg, opt('--out'), rest.includes('--to-vault'), rest.includes('--force'));
-  else fail('usage: backup.mjs <backup <name> --to <folder> | verify <file> | restore <file> --out <folder> [--to-vault] [--force]>');
+  else if (cmd === 'inspect') await inspect(arg);
+  else if (cmd === 'apply') await apply(arg, opt('--parts'), rest.includes('--replace-vault'));
+  else fail('usage: backup.mjs <backup <name> --to <folder> | verify <file> | restore <file> --out <folder> [--to-vault] [--force] | inspect <file> | apply <file> --parts vault,config,desktop [--replace-vault]>');
 } catch (e) {
   fail(e.message);
 }
