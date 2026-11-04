@@ -396,17 +396,20 @@ async function runScript(script, args) {
   }
 }
 
-async function saveToVault(id) {
+const PARTS = ['desktop', 'browser']; // the CLI login cannot be saved, so it is not a part
+
+// parts: which of the two to save. The dashboard saves one at a time; no parts means both.
+async function saveToVault(id, parts = PARTS) {
   if (vaulting) throw httpError(409, 'A Vault save is already in progress');
   vaulting = true;
   try {
-    const desktop = await runScript('desktop-vault.mjs', ['push', id]); // may show the Keychain prompt
-    const browser = await runScript('vault.mjs', ['push', id]);
-    const cli = {
-      ok: true,
-      message: 'not saved. Its login lives only in this Mac\'s Keychain, so run /login once on the new laptop.',
-    };
-    return { desktop, browser, cli };
+    const out = {};
+    if (parts.includes('desktop')) out.desktop = await runScript('desktop-vault.mjs', ['push', id]); // may show the Keychain prompt
+    if (parts.includes('browser')) out.browser = await runScript('vault.mjs', ['push', id]);
+    if (parts.length === PARTS.length) {
+      out.cli = { ok: true, message: "not saved. Its login lives only in this Mac's Keychain, so run /login once on the new laptop." };
+    }
+    return out;
   } finally {
     vaulting = false;
   }
@@ -480,7 +483,13 @@ app.post('/api/desktop/switch/:name', async (req, res) => {
   res.json(await switchDesktop(req.params.name));
 });
 app.get('/api/accounts/:id/vault', async (req, res) => res.json(await vaultStatus(req.params.id)));
-app.post('/api/accounts/:id/vault', async (req, res) => res.json(await saveToVault(req.params.id)));
+app.post('/api/accounts/:id/vault', async (req, res) => {
+  const wanted = String(req.query.parts ?? PARTS.join(',')).split(',').filter(Boolean);
+  if (!wanted.length || wanted.some((p) => !PARTS.includes(p))) {
+    throw httpError(400, `parts must be ${PARTS.join(' and/or ')}`);
+  }
+  res.json(await saveToVault(req.params.id, wanted));
+});
 app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
 app.post('/api/accounts/:id/reset', async (req, res) => res.json(await resetProfile(req.params.id)));
 

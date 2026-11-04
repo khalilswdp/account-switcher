@@ -67,6 +67,11 @@ async function loadVault(id) {
   render();
 }
 
+const SAVE_CONFIRM = {
+  desktop: (a) => `Save the desktop app login for "${a.label}" to the Vault?\n\nThis is the sessionKey cookie only. macOS will ask to allow Keychain access: click Allow.`,
+  browser: (a) => `Save the browser (claude.ai) session for "${a.label}" to the Vault?\n\nThis is the signed-in session of that browser profile.`,
+};
+
 // [text, dim?] for one part of the "Saved in the Vault" box
 function vaultText(part, describe) {
   if (!part) return ['checking...', true];
@@ -99,10 +104,10 @@ async function call(id, action, label) {
       log(`[${id}] ${state}: "${body.title}" (${body.cookies} cookies, ${body.url})`, body.loggedIn === false);
     } else if (action === 'cli') {
       log(`[${id}] Terminal opened with Claude Code (${body.command})`);
-    } else if (action === 'vault') {
-      log(`[${id}] Vault, desktop app: ${body.desktop?.message ?? 'no answer'}`, !body.desktop?.ok);
-      log(`[${id}] Vault, browser session: ${body.browser?.message ?? 'no answer'}`, !body.browser?.ok);
-      log(`[${id}] Vault, Claude Code CLI: ${body.cli?.message ?? 'not saved (its login cannot be stored)'}`);
+    } else if (action.startsWith('vault')) {
+      if (body.desktop) log(`[${id}] Vault, desktop app: ${body.desktop.message}`, !body.desktop.ok);
+      if (body.browser) log(`[${id}] Vault, browser session: ${body.browser.message}`, !body.browser.ok);
+      if (body.cli) log(`[${id}] Vault, Claude Code CLI: ${body.cli.message}`);
       loadVault(id);
     } else if (action === 'save') {
       log(`[${id}] Session saved`);
@@ -133,13 +138,24 @@ function card(a) {
   const vi = vaultInfo[a.id];
   const box = h('div', 'mt-3 space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60');
   box.append(h('p', 'font-medium text-zinc-600 dark:text-zinc-300', 'Saved in the Vault'));
-  const line = (name, [text, dim]) => {
-    const r = h('div', 'flex justify-between gap-3');
-    r.append(h('span', 'shrink-0 text-zinc-500', name), h('span', `text-right ${dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400'}`, text));
+  // One row per part. Each has its own Save button, so you choose what goes to the Vault.
+  const line = (name, [text, dim], part) => {
+    const r = h('div', 'flex items-center justify-between gap-3');
+    const left = h('div', 'min-w-0');
+    left.append(h('div', 'text-zinc-500', name), h('div', dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400', text));
+    r.append(left);
+    if (part) {
+      const b = h('button', 'shrink-0 rounded border border-zinc-300 px-2 py-1 text-[11px] font-medium hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:hover:bg-zinc-700', 'Save');
+      b.disabled = inFlight.has(a.id) || a.status === 'busy';
+      b.addEventListener('click', () => {
+        if (confirm(SAVE_CONFIRM[part](a))) call(a.id, `vault?parts=${part}`, 'Saved to Vault');
+      });
+      r.append(b);
+    }
     box.append(r);
   };
-  line('Desktop app', vaultText(vi?.desktop, () => 'login cookie'));
-  line('Browser (claude.ai)', vaultText(vi?.browser, (v) => `${v.cookies} cookies`));
+  line('Desktop app', vaultText(vi?.desktop, () => 'login cookie'), 'desktop');
+  line('Browser (claude.ai)', vaultText(vi?.browser, (v) => `${v.cookies} cookies`), 'browser');
   line('Claude Code CLI', ["can't be saved (run /login on the new laptop)", true]);
   el.append(box);
 
@@ -159,14 +175,6 @@ function card(a) {
   } else {
     btn('Login / Sync Session', 'bg-violet-600 text-white hover:bg-violet-500', 'login', 'Login window opened', a.status === 'busy');
     btn('Open Claude Code', 'bg-zinc-800 text-white hover:bg-zinc-700 dark:bg-zinc-200 dark:text-zinc-900 dark:hover:bg-zinc-300', 'cli', 'Terminal opened');
-    btn(
-      'Save to Vault',
-      OUTLINE,
-      'vault',
-      'Saved to Vault',
-      a.status === 'busy',
-      `Save "${a.label}" to the Vault?\n\n- Desktop app: the login cookie (sessionKey)\n- Browser (claude.ai): the signed-in session, if there is one\n- Claude Code CLI: NOT saved (its login stays in this Mac's Keychain)\n\nmacOS will ask to allow Keychain access: click Allow.`,
-    );
     btn('Run test task', 'text-xs text-zinc-500 hover:text-zinc-300', 'task', 'Task', !['ready', 'login_required'].includes(a.status));
     btn(
       'Reset profile',
