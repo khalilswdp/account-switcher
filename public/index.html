@@ -70,6 +70,7 @@ async function loadVault(id) {
 const SAVE_CONFIRM = {
   desktop: (a) => `Save the desktop app login for "${a.label}" to the Vault?\n\nThis is the sessionKey cookie only. macOS will ask to allow Keychain access: click Allow.`,
   browser: (a) => `Save the browser (claude.ai) session for "${a.label}" to the Vault?\n\nThis is the signed-in session of that browser profile.`,
+  cli: (a) => `Save the Claude Code (CLI) login for "${a.label}" to the Vault?\n\nThis is the login the CLI keeps in this Mac's Keychain. macOS may ask to allow Keychain access: click Allow.`,
 };
 
 // [text, dim?] for one part of the "Saved in the Vault" box
@@ -134,7 +135,7 @@ function card(a) {
     el.append(h('p', 'mt-3 break-words text-xs text-zinc-500', `Last task: "${a.lastResult.title}" (${a.lastResult.cookies} cookies)`));
   }
 
-  // What is in the Vault right now, per part. The CLI login is not saved to the Vault yet.
+  // What is in the Vault right now, per part.
   const vi = vaultInfo[a.id];
   const box = h('div', 'mt-3 space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60');
   box.append(h('p', 'font-medium text-zinc-600 dark:text-zinc-300', 'Saved in the Vault'));
@@ -156,7 +157,7 @@ function card(a) {
   };
   line('Desktop app', vaultText(vi?.desktop, () => 'login cookie'), 'desktop');
   line('Browser (claude.ai)', vaultText(vi?.browser, (v) => `${v.cookies} cookies`), 'browser');
-  line('Claude Code CLI', ['not saved yet (run /login on the new laptop)', true]);
+  line('Claude Code CLI', vaultText(vi?.cli, () => 'CLI login'), 'cli');
   el.append(box);
 
   const actions = h('div', 'mt-4 flex flex-wrap gap-2');

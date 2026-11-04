@@ -396,9 +396,9 @@ async function runScript(script, args) {
   }
 }
 
-const PARTS = ['desktop', 'browser']; // the CLI login cannot be saved, so it is not a part
+const PARTS = ['desktop', 'browser', 'cli'];
 
-// parts: which of the two to save. The dashboard saves one at a time; no parts means both.
+// parts: which of the three to save. The dashboard saves one at a time; no parts means all.
 async function saveToVault(id, parts = PARTS) {
   if (vaulting) throw httpError(409, 'A Vault save is already in progress');
   vaulting = true;
@@ -406,9 +406,7 @@ async function saveToVault(id, parts = PARTS) {
     const out = {};
     if (parts.includes('desktop')) out.desktop = await runScript('desktop-vault.mjs', ['push', id]); // may show the Keychain prompt
     if (parts.includes('browser')) out.browser = await runScript('vault.mjs', ['push', id]);
-    if (parts.length === PARTS.length) {
-      out.cli = { ok: true, message: 'not saved yet. For now, run /login once on the new laptop.' };
-    }
+    if (parts.includes('cli')) out.cli = await runScript('cli-vault.mjs', ['push', id]); // may show the Keychain prompt
     return out;
   } finally {
     vaulting = false;
@@ -427,11 +425,12 @@ async function scriptStatus(script, id) {
 }
 
 async function vaultStatus(id) {
-  const [desktop, browser] = await Promise.all([
+  const [desktop, browser, cli] = await Promise.all([
     scriptStatus('desktop-vault.mjs', id),
     scriptStatus('vault.mjs', id),
+    scriptStatus('cli-vault.mjs', id),
   ]);
-  return { desktop, browser, cli: { state: 'not_supported' } };
+  return { desktop, browser, cli };
 }
 
 // -------------------------------------------------------------------- API
