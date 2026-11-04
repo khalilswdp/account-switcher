@@ -77,7 +77,7 @@ function loadAccounts() {
 const ACCOUNTS = loadAccounts();
 
 // mode: idle | busy (task running) | login (headed window open)
-const newRuntime = () => ({ mode: 'idle', visual: null, lastResult: null, loggedOut: false });
+const newRuntime = () => ({ mode: 'idle', visual: null, lastResult: null, loggedOut: false, challenged: false });
 const runtime = Object.fromEntries(Object.keys(ACCOUNTS).map((id) => [id, newRuntime()]));
 
 // Makes an account that exists in the Vault but not on this Mac a local one, so its card,
@@ -264,9 +264,11 @@ async function runTask(id) {
       title,
       url: page.url(),
       loggedIn,
+      challenged: CHALLENGE.test(title), // Cloudflare's bot check answered, not Claude
       cookies: (await context.cookies()).length,
       at: new Date().toISOString(),
     };
+    rt.challenged = result.challenged;
     if (loggedIn !== null) rt.loggedOut = !loggedIn;
     if (loggedIn === true) await saveBackup(id, context);
     rt.lastResult = result;
@@ -308,6 +310,8 @@ async function startLogin(id) {
 
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    // If Cloudflare's bot check is what opened, say so on the card (the person can tick its box).
+    rt.challenged = CHALLENGE.test(await page.title().catch(() => ''));
   } catch (e) {
     await context?.close().catch(() => {});
     rt.visual = null;
@@ -697,13 +701,13 @@ app.param('id', (req, res, next, id) =>
 app.get('/api/accounts', async (req, res) => {
   const list = await Promise.all(
     Object.entries(ACCOUNTS).map(async ([id, a]) => {
-      const { mode, lastResult, loggedOut } = runtime[id];
+      const { mode, lastResult, loggedOut, challenged } = runtime[id];
       let status = mode;
       if (mode === 'idle') {
         if (!(await isReady(id))) status = 'not_logged_in';
         else status = loggedOut ? 'login_required' : 'ready';
       }
-      return { id, label: a.label, status, lastResult, cliConfigDir: a.cliConfigDir };
+      return { id, label: a.label, status, lastResult, challenged, cliConfigDir: a.cliConfigDir };
     }),
   );
   res.json(list);

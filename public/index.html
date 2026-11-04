@@ -198,8 +198,11 @@ async function call(id, action, label) {
           : body.error || res.statusText,
       );
     }
-    if (action === 'task') {
-      const state = body.loggedIn === true ? 'signed in' : body.loggedIn === false ? 'LOGIN REQUIRED' : 'login state unknown (challenge page)';
+    if (action === 'task' && body.challenged) {
+      log(`[${id}] Cloudflare is challenging the automated browser. This is a bot check, not a login failure, and it says nothing about whether this account is signed in.`, true);
+      log(`[${id}]   Signing in by hand in the login window can work (tick "verify you are human"); automated tasks may keep being challenged. The desktop app and the CLI are not affected.`);
+    } else if (action === 'task') {
+      const state = body.loggedIn === true ? 'signed in' : body.loggedIn === false ? 'LOGIN REQUIRED' : 'login state unknown';
       log(`[${id}] ${state}: "${body.title}" (${body.cookies} cookies, ${body.url})`, body.loggedIn === false);
     } else if (action === 'cli') {
       log(`[${id}] Terminal opened with Claude Code (${body.command})`);
@@ -235,6 +238,10 @@ function card(a) {
   el.append(h('p', 'mt-3 font-mono text-xs text-zinc-500', `CLI config: ${a.cliConfigDir ?? 'default (~/.claude)'}`));
   const dc = desktopControl(a);
   if (dc?.note) el.append(h('p', `mt-1 text-xs ${dc.dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400'}`, dc.note));
+  if (a.challenged) {
+    el.append(h('p', 'mt-2 rounded-md bg-amber-100 p-2 text-xs text-amber-900 dark:bg-amber-900/30 dark:text-amber-200',
+      'Cloudflare is challenging the automated browser. This is a bot check, not a login failure. If the login window shows a "verify you are human" box, tick it. The desktop app and the CLI are not affected.'));
+  }
   if (a.lastResult) {
     el.append(h('p', 'mt-3 break-words text-xs text-zinc-500', `Last task: "${a.lastResult.title}" (${a.lastResult.cookies} cookies)`));
   }
