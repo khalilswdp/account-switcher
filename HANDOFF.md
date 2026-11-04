@@ -94,7 +94,10 @@ via the app…" (`POST /api/desktop/new/:id`: parks the current data, reopens th
 account that exists only in the Vault is listed with "Add to this Mac" (`POST /api/vault/add?account=`,
 optional `{label}`), after which its card's Load buttons bring the logins over. Both kinds are remembered
 in `.accounts.local.json`. A new account must be added to `VAULT_ALLOWED_ACCOUNTS` in `.env` before its
-Vault buttons work (the card says so).
+Vault buttons work (the card says so). "Remove from this Mac" on a card forgets the account
+(`DELETE /api/accounts/:id`), in whichever file listed it, and deletes none of its data: app folder,
+Claude Code folder, Keychain login and Vault entries all stay, so it can be added back. It is refused
+while the Claude app is on that account. With no accounts at all the page shows an empty state.
 
 **Vault layout.** KV v2 mount `secret/`, entries under `claude-switcher/`: `desktop/<name>` and
 `cli/<name>`. Each value is one JSON "envelope". History is capped at 2 versions (`trim`). The helper

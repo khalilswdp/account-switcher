@@ -237,6 +237,25 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   r = await s.call(`/api/backups?folder=${encodeURIComponent(path.join(s.dir, 'nope'))}`);
   assert.equal(r.status, 404);
 
+  // removing an account forgets its card only, in whichever file listed it
+  const remove = (id, origin = s.base) => s.call(`/api/accounts/${id}`, { method: 'DELETE', headers: { Origin: origin } });
+  r = await remove('plain', 'http://evil.example');
+  assert.equal(r.status, 403);
+  r = await remove('a');
+  assert.equal(r.status, 409); // the Claude app is on a
+  assert.match(r.body.error, /switch it/);
+  r = await remove('plain');
+  assert.equal(r.status, 200);
+  r = await remove('c');
+  assert.equal(r.status, 200);
+  r = await remove('nobody');
+  assert.equal(r.status, 404);
+  r = await s.call('/api/state');
+  assert.deepEqual(r.body.accounts.map((x) => x.id), ['a', 'b', 'ghost', 'work']);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(s.dir, 'accounts.local.json'), 'utf8')).map((x) => x.id), ['ghost', 'work']);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(s.dir, 'accounts.json'), 'utf8')).map((x) => x.id), ['a', 'b']);
+  assert.equal(await exists(path.join(s.support, 'Claude.b')), true); // data is never touched by a removal
+
   assert.doesNotMatch(s.log(), /SECRET|Error/);
 });
 

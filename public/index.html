@@ -137,6 +137,11 @@
 
   <div id="cards" class="cards"></div>
 
+  <section id="empty" class="panel" style="margin-top: 1rem;" hidden>
+    <h2>No accounts on this Mac yet</h2>
+    <p class="muted">Use "Add an account…" above, or "Add to this Mac" on an account from the Vault.</p>
+  </section>
+
   <section class="log">
     <div class="log-head">
       <h2>Activity</h2>
@@ -305,6 +310,7 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 const post = (path, body) => api(path, { method: 'POST', body });
+const del = (path) => api(path, { method: 'DELETE' });
 
 function log(text, error = false) {
   const box = $('#log-box');
@@ -331,6 +337,7 @@ function render(force = false) {
   renderOverview();
   renderVaultOnly();
   $('#cards').replaceChildren(...state.accounts.map(card));
+  $('#empty').hidden = state.accounts.length > 0 || !state.desktop; // nothing known yet, or nothing to show
 }
 
 function renderOverview() {
@@ -389,7 +396,14 @@ function card(a) {
     el.append(b);
   }
   const foot = h('footer');
-  foot.append(button('Back up this account…', 'btn btn-quiet', () => openBackup(a), { disabled: Boolean(busy[a.id]) }));
+  const onIt = state.desktop?.active === a.id;
+  foot.append(
+    button('Back up this account…', 'btn btn-quiet', () => openBackup(a), { disabled: Boolean(busy[a.id]) }),
+    button('Remove from this Mac', 'btn btn-quiet btn-danger', () => removeAccount(a), {
+      disabled: Boolean(busy[a.id]) || onIt,
+      title: onIt ? 'The Claude app is on this account: switch it to another one first' : 'Removes the card only; nothing is deleted',
+    }),
+  );
   el.append(foot);
   return el;
 }
@@ -609,6 +623,33 @@ async function initDesktop(a) {
 
 async function openCli(a) {
   await act(a, 'Opening Terminal…', () => post(`/api/accounts/${a.id}/cli`), (r) => `Terminal opened with Claude Code (${r.command})`);
+}
+
+// Forgets the account on this Mac: the card goes, nothing of its data does. Added back any time.
+async function removeAccount(a) {
+  const vi = vaultInfo[a.id];
+  const keeps = [];
+  if (state.desktop?.parked?.includes(a.id)) keeps.push('its Claude app data (parked)');
+  if (vi?.cli?.local?.present) keeps.push('its Claude Code login in the Keychain');
+  if (vi?.desktop?.vault || vi?.cli?.vault) keeps.push('its entries in the Vault');
+  const lines = [
+    `Only the card goes. Nothing is deleted: ${keeps.length ? `${keeps.join(', ')} and any Claude Code folder stay where they are.` : 'any folder, login or Vault entry it has stays where it is.'}`,
+    'You can add it back any time with "Add an account…" (same short name) or from the Vault.',
+  ];
+  if (!(await ask({ title: `Remove "${a.label}" from this Mac?`, lines, ok: 'Remove the card', danger: true }))) return;
+  busy[a.id] = 'Removing the card…';
+  render();
+  try {
+    await del(`/api/accounts/${a.id}`);
+    log(`[${a.id}] Removed from this Mac. Nothing of its data was deleted.`);
+    delete vaultInfo[a.id];
+  } catch (e) {
+    log(`[${a.id}] Failed: ${e.message}`, true);
+  } finally {
+    delete busy[a.id];
+    await refresh();
+    loadVaultAccounts(); // an account that is in the Vault shows up again as "not on this Mac"
+  }
 }
 
 // ------------------------------------------------------------------- add an account

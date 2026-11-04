@@ -45,20 +45,21 @@ function readList(file) {
   }
 }
 
+const DEFAULT_ACCOUNTS = [
+  { id: 'main', label: 'Account 1: Main Claude session' },
+  { id: 'test', label: 'Account 2: Empty test account' },
+];
+
+// No accounts at all is fine: the page then offers "Add an account…".
 function loadAccounts() {
-  const base = readList(ACCOUNTS_FILE) ?? [
-    { id: 'main', label: 'Account 1: Main Claude session' },
-    { id: 'test', label: 'Account 2: Empty test account' },
-  ];
   const out = Object.create(null);
-  for (const { id, label, cliConfigDir } of base) {
+  for (const { id, label, cliConfigDir } of readList(ACCOUNTS_FILE) ?? DEFAULT_ACCOUNTS) {
     if (out[id]) throw new Error(`Duplicate account id: ${id}`);
     out[id] = makeAccount(id, label, cliConfigDir);
   }
   for (const { id, label } of readList(LOCAL_ACCOUNTS_FILE) ?? []) {
     if (!out[id]) out[id] = makeAccount(id, label);
   }
-  if (!Object.keys(out).length) throw new Error(`${ACCOUNTS_FILE} defines no accounts`);
   return out;
 }
 const ACCOUNTS = loadAccounts();
@@ -75,6 +76,24 @@ async function registerAccount(id, label = '') {
 }
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
+
+// Forgets an account on this Mac: its card goes, in whichever file listed it. Nothing of its data is
+// deleted (app data folder, Claude Code folder, Keychain login, Vault entries), so it can be added
+// back any time. Refused while the Claude app is on it.
+async function forgetAccount(id) {
+  const state = await desktopState();
+  if (state.supported && state.active === id) throw httpError(409, 'The Claude app is on this account: switch it to another account first');
+  const base = readList(ACCOUNTS_FILE) ?? DEFAULT_ACCOUNTS;
+  if (base.some((a) => a.id === id)) {
+    await fs.writeFile(ACCOUNTS_FILE, `${JSON.stringify(base.filter((a) => a.id !== id), null, 2)}\n`);
+  }
+  const local = readList(LOCAL_ACCOUNTS_FILE) ?? [];
+  if (local.some((a) => a.id === id)) {
+    await fs.writeFile(LOCAL_ACCOUNTS_FILE, `${JSON.stringify(local.filter((a) => a.id !== id), null, 2)}\n`, { mode: 0o600 });
+  }
+  delete ACCOUNTS[id];
+  return { ok: true, removed: id };
+}
 
 // ------------------------------------------------- Claude Code (CLI) launcher
 
@@ -428,7 +447,7 @@ app.use((req, res, next) => {
   if (!LOCAL_HOSTS.has(hostOf(req.headers.host ?? ''))) {
     return res.status(403).json({ error: `Open the dashboard at http://127.0.0.1:${PORT}` });
   }
-  if (req.method === 'POST' && req.headers.origin) {
+  if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin) {
     let host;
     try {
       host = new URL(req.headers.origin).host;
@@ -457,6 +476,7 @@ app.post('/api/accounts', express.json({ limit: '4kb' }), async (req, res) => {
   await registerAccount(id, String(req.body?.label ?? ''));
   res.json({ ok: true, account: id, label: ACCOUNTS[id].label });
 });
+app.delete('/api/accounts/:id', async (req, res) => res.json(await forgetAccount(req.params.id)));
 
 app.get('/api/desktop', async (req, res) => res.json({ ...(await desktopState()), switching }));
 app.post('/api/desktop/switch/:name', async (req, res) => {
