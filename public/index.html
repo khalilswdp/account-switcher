@@ -52,9 +52,18 @@
       opened, and there is no way to recover it.</strong> Store the file somewhere other than this Mac's disk.
     </p>
     <label class="block text-xs">Folder to save it in
-      <input id="backup-folder" autocomplete="off" placeholder="~/Documents/Claude-backups"
-        class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
+      <span class="mt-1 flex gap-2">
+        <input id="backup-folder" autocomplete="off" placeholder="~/Documents/Claude-backups"
+          class="w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
+        <button type="button" id="backup-browse" class="shrink-0 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800">Browse...</button>
+      </span>
     </label>
+    <fieldset id="backup-existing" class="hidden space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60">
+      <legend class="sr-only">Existing backups</legend>
+      <p id="backup-existing-note" class="text-zinc-500"></p>
+      <label class="flex items-start gap-2"><input type="radio" name="backup-mode" value="new" checked class="mt-0.5" /><span>Add a new backup and keep the existing one(s)</span></label>
+      <label class="flex items-start gap-2"><input type="radio" name="backup-mode" value="replace" class="mt-0.5" /><span>Replace the existing one(s): the older files for this account are deleted once the new one is written and checked to open</span></label>
+    </fieldset>
     <label class="block text-xs">Passphrase (at least 12 characters)
       <input id="backup-pass" type="password" autocomplete="new-password"
         class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
@@ -79,9 +88,14 @@
       <strong>nothing that already exists is overwritten or deleted.</strong>
     </p>
     <label class="block text-xs">Folder with the backups
-      <input id="restore-folder" autocomplete="off" placeholder="~/Documents/Claude-backups"
-        class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
+      <span class="mt-1 flex gap-2">
+        <input id="restore-folder" autocomplete="off" placeholder="~/Documents/Claude-backups"
+          class="w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
+        <button type="button" id="restore-browse-folder" class="shrink-0 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800">Browse...</button>
+      </span>
     </label>
+    <p class="text-xs text-zinc-500">The newest backup in the folder is selected for you.
+      <button type="button" id="restore-browse-file" class="underline hover:text-zinc-300">Choose a specific file...</button></p>
     <label class="block text-xs">Backup file
       <select id="restore-file" class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700"></select>
     </label>
@@ -498,6 +512,50 @@ $('#vault-account').addEventListener('change', renderVaultButtons);
 const backupDialog = $('#backup-dialog');
 let backupFor = null;
 
+// The native macOS chooser (the server runs on this Mac): resolves to a path, or null if cancelled.
+async function browse(kind) {
+  const res = await fetch(`/api/pick?kind=${kind}`, { method: 'POST' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(res.status === 404 && body.error === 'Not found'
+      ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
+      : body.error || res.statusText);
+  }
+  return body.canceled ? null : body.path;
+}
+
+// When this account already has backups in the chosen folder, offer: add a new one, or replace.
+async function refreshBackupExisting() {
+  const box = $('#backup-existing');
+  box.classList.add('hidden');
+  const folder = $('#backup-folder').value.trim();
+  if (!folder || !backupFor) return;
+  try {
+    const res = await fetch(`/api/backups?folder=${encodeURIComponent(folder)}&account=${encodeURIComponent(backupFor.id)}`);
+    if (!res.ok) return;
+    const { files } = await res.json();
+    if (!files.length) return;
+    $('#backup-existing-note').textContent = `This folder already has ${files.length} backup${files.length > 1 ? 's' : ''} of this account (newest: ${when(files[0].modified)}).`;
+    document.querySelector('input[name="backup-mode"][value="new"]').checked = true; // the safe choice
+    box.classList.remove('hidden');
+  } catch {
+    /* no hint: the backup itself still works */
+  }
+}
+
+$('#backup-folder').addEventListener('change', refreshBackupExisting);
+$('#backup-browse').addEventListener('click', async () => {
+  try {
+    const picked = await browse('folder');
+    if (picked) {
+      $('#backup-folder').value = picked;
+      refreshBackupExisting();
+    }
+  } catch (e) {
+    $('#backup-error').textContent = e.message;
+  }
+});
+
 function openBackup(a) {
   backupFor = a;
   $('#backup-name').textContent = a.label;
@@ -509,6 +567,7 @@ function openBackup(a) {
   } catch {
     /* storage unavailable: the field stays empty */
   }
+  refreshBackupExisting();
   backupDialog.showModal();
 }
 
@@ -524,6 +583,8 @@ $('#backup-form').addEventListener('submit', async (e) => {
   if (pass !== $('#backup-pass2').value) return void (error.textContent = 'The two passphrases are not the same.');
 
   const a = backupFor;
+  const replace = !$('#backup-existing').classList.contains('hidden')
+    && document.querySelector('input[name="backup-mode"]:checked')?.value === 'replace';
   try {
     localStorage.setItem('backupFolder', folder);
   } catch {
@@ -539,7 +600,7 @@ $('#backup-form').addEventListener('submit', async (e) => {
     const res = await fetch(`/api/accounts/${a.id}/backup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folder, passphrase: pass }), // in the body, never in the URL
+      body: JSON.stringify({ folder, passphrase: pass, replace }), // in the body, never in the URL
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -548,6 +609,7 @@ $('#backup-form').addEventListener('submit', async (e) => {
         : body.error || res.statusText);
     }
     log(`[${a.id}] Backup saved: ${body.file} (${(body.bytes / 1048576).toFixed(1)} MB)`);
+    if (body.replaced?.length) log(`[${a.id}]   replaced ${body.replaced.length} older backup(s): ${body.replaced.join(', ')}`);
     for (const [part, state] of Object.entries(body.logins)) log(`[${a.id}]   ${part} login: ${state}`, state !== 'saved');
     for (const note of body.notes ?? []) log(`[${a.id}]   note: ${note}`, true);
     log(`[${a.id}] Keep the passphrase safe: without it the file cannot be opened.`);
@@ -582,7 +644,9 @@ function resetRestore() {
   $('#restore-go').textContent = 'Open backup';
 }
 
-async function loadBackupList() {
+// Lists the backups in the folder, newest first, and selects the newest. "want" selects a file the
+// user picked by hand (even one that does not follow the usual file name).
+async function loadBackupList(want = null) {
   const folder = $('#restore-folder').value.trim();
   const select = $('#restore-file');
   select.replaceChildren();
@@ -593,11 +657,20 @@ async function loadBackupList() {
     const res = await fetch(`/api/backups?folder=${encodeURIComponent(folder)}`);
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || res.statusText);
-    if (!body.files.length) return void ($('#restore-error').textContent = 'No backup files (claude-backup-*.csbk) in that folder.');
-    for (const f of body.files) {
-      const o = h('option', 'text-black', `${f.name}  (${(f.bytes / 1048576).toFixed(1)} MB)`);
+    if (!body.files.length && !want) return void ($('#restore-error').textContent = 'No backup files (claude-backup-*.csbk) in that folder.');
+    body.files.forEach((f, i) => {
+      const o = h('option', 'text-black', `${i === 0 ? '(newest) ' : ''}${f.name}  (${(f.bytes / 1048576).toFixed(1)} MB)`);
       o.value = f.path;
       select.append(o);
+    });
+    if (want) {
+      let o = [...select.options].find((x) => x.value === want);
+      if (!o) {
+        o = h('option', 'text-black', want.split('/').pop());
+        o.value = want;
+        select.append(o);
+      }
+      select.value = want;
     }
   } catch (e) {
     $('#restore-error').textContent = e.message;
@@ -643,7 +716,7 @@ function showRestoreChoices(info) {
   choices.classList.remove('hidden');
 }
 
-$('#restore-open').addEventListener('click', () => {
+$('#restore-open').addEventListener('click', async () => {
   $('#restore-pass').value = '';
   try {
     $('#restore-folder').value = localStorage.getItem('backupFolder') || '';
@@ -652,6 +725,32 @@ $('#restore-open').addEventListener('click', () => {
   }
   loadBackupList();
   restoreDialog.showModal();
+  // Nothing remembered (a fresh Mac, say): open the file chooser straight away. Cancel keeps the dialog.
+  if (!$('#restore-folder').value) await pickBackupFile();
+});
+
+async function pickBackupFile() {
+  try {
+    const p = await browse('file');
+    if (p) {
+      $('#restore-folder').value = p.slice(0, p.lastIndexOf('/')) || '/';
+      await loadBackupList(p);
+    }
+  } catch (e) {
+    $('#restore-error').textContent = e.message;
+  }
+}
+$('#restore-browse-file').addEventListener('click', pickBackupFile);
+$('#restore-browse-folder').addEventListener('click', async () => {
+  try {
+    const p = await browse('folder');
+    if (p) {
+      $('#restore-folder').value = p;
+      await loadBackupList();
+    }
+  } catch (e) {
+    $('#restore-error').textContent = e.message;
+  }
 });
 $('#restore-cancel').addEventListener('click', () => restoreDialog.close());
 restoreDialog.addEventListener('close', () => {

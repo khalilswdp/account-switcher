@@ -573,10 +573,10 @@ function runWithStdin(script, args, input, timeoutMs) {
   });
 }
 
-async function backupAccount(id, folder, passphrase) {
+async function backupAccount(id, folder, passphrase, replace = false) {
   if (typeof passphrase !== 'string' || passphrase.length < 12) throw httpError(400, 'the passphrase must be at least 12 characters');
   if (typeof folder !== 'string' || !folder.trim()) throw httpError(400, 'choose a folder for the backup file');
-  return runBackupTool(['backup', id, '--to', folder.trim()], passphrase);
+  return runBackupTool(['backup', id, '--to', folder.trim(), ...(replace ? ['--replace'] : [])], passphrase);
 }
 
 // One backup operation at a time (the login reads can show Keychain prompts). The tool prints one
@@ -597,9 +597,26 @@ async function runBackupTool(args, passphrase) {
   }
 }
 
-// Backup files in a folder: names, sizes and times only.
-async function listBackups(folder) {
+// A native macOS folder or file chooser, so a path never has to be typed. The prompts are fixed here.
+async function pickPath(kind) {
+  if (process.platform !== 'darwin') throw httpError(501, 'The picker is only available on macOS');
+  const choose = kind === 'folder'
+    ? 'choose folder with prompt "Choose the folder for the backups"'
+    : 'choose file with prompt "Choose a Claude backup (a .csbk file)"';
+  try {
+    // "activate" brings the chooser in front of the browser window
+    const { stdout } = await run('osascript', ['-e', `tell current application\nactivate\nreturn POSIX path of (${choose})\nend tell`], { timeout: 300_000 });
+    return { path: stdout.trim().replace(/(.)\/$/, '$1') };
+  } catch (e) {
+    if (/-128|cancel/i.test(e.stderr || '')) return { canceled: true };
+    throw httpError(500, 'could not open the file chooser');
+  }
+}
+
+// Backup files in a folder: names, sizes and times only. With an account, only that account's.
+async function listBackups(folder, account = null) {
   if (!folder.trim()) throw httpError(400, 'choose a folder');
+  if (account !== null && !/^[\w-]+$/.test(account)) throw httpError(400, 'invalid account name');
   const f = folder.trim();
   const dir = f === '~' ? os.homedir() : f.startsWith('~/') ? path.join(os.homedir(), f.slice(2)) : path.resolve(f);
   let names;
@@ -609,7 +626,8 @@ async function listBackups(folder) {
     throw httpError(404, `no such folder: ${dir}`);
   }
   const files = [];
-  for (const name of names.filter((n) => /^claude-backup-.+\.csbk$/.test(n))) {
+  const mine = account ? new RegExp(`^claude-backup-${account}-\\d{8}-\\d{6}(-\\d+)?\\.csbk$`) : /^claude-backup-.+\.csbk$/;
+  for (const name of names.filter((n) => mine.test(n))) {
     const st = await fs.stat(path.join(dir, name));
     files.push({ name, path: path.join(dir, name), bytes: st.size, modified: st.mtime.toISOString() });
   }
@@ -717,9 +735,16 @@ app.post('/api/vault/load', async (req, res) => {
   res.json({ ...(await loadPart(id, part)), account: id });
 });
 app.post('/api/accounts/:id/backup', express.json({ limit: '16kb' }), async (req, res) =>
-  res.json(await backupAccount(req.params.id, req.body?.folder, req.body?.passphrase)),
+  res.json(await backupAccount(req.params.id, req.body?.folder, req.body?.passphrase, req.body?.replace === true)),
 );
-app.get('/api/backups', async (req, res) => res.json(await listBackups(String(req.query.folder ?? ''))));
+app.get('/api/backups', async (req, res) =>
+  res.json(await listBackups(String(req.query.folder ?? ''), req.query.account ? String(req.query.account) : null)),
+);
+app.post('/api/pick', async (req, res) => {
+  const kind = String(req.query.kind ?? '');
+  if (!['folder', 'file'].includes(kind)) throw httpError(400, 'kind must be folder or file');
+  res.json(await pickPath(kind));
+});
 app.post('/api/backup/inspect', express.json({ limit: '16kb' }), async (req, res) =>
   res.json(await runBackupTool(['inspect', backupFile(req.body?.file)], req.body?.passphrase)),
 );

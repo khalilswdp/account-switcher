@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 // Full backup of one account into ONE passphrase-encrypted file you keep somewhere safe.
 //
-//   node scripts/backup.mjs backup <name> --to <folder>       make the backup (asks for a passphrase)
+//   node scripts/backup.mjs backup <name> --to <folder> [--replace]
+//                                                             make the backup (asks for a passphrase). Always a new
+//                                                             timestamped file; with --replace the older backups of
+//                                                             this account in that folder are deleted afterwards, but
+//                                                             only once the new one is proven to open
 //   node scripts/backup.mjs verify <file>                     check it opens and show what is inside
 //   node scripts/backup.mjs restore <file> --out <folder> [--to-vault] [--force]
 //                                                             unpack it (and optionally put the logins back in the Vault)
@@ -135,13 +139,18 @@ async function decryptedStream(file, passphrase) {
   return createReadStream(file, { start: HEADER, end: size - TAG - 1 }).pipe(decipher);
 }
 
-// Reads the whole file once to be sure the passphrase is right and nothing is damaged.
-async function authenticate(file, passphrase) {
+// Reads the whole file once to see whether the passphrase is right and nothing is damaged.
+async function opens(file, passphrase) {
   try {
     for await (const _ of await decryptedStream(file, passphrase)) void _;
+    return true;
   } catch {
-    fail('wrong passphrase, or the file is damaged');
+    return false;
   }
+}
+
+async function authenticate(file, passphrase) {
+  if (!(await opens(file, passphrase))) fail('wrong passphrase, or the file is damaged');
 }
 
 function tarFrom(stream, args) {
@@ -204,7 +213,7 @@ function pushInto(stage, script, name) {
   });
 }
 
-async function backup(name, toArg) {
+async function backup(name, toArg, replace = false) {
   if (!/^[\w-]+$/.test(name ?? '')) fail('account name may only use letters, digits, - and _');
   if (!toArg) fail('usage: backup <name> --to <folder>');
   const folder = path.resolve(expand(toArg));
@@ -279,8 +288,25 @@ async function backup(name, toArg) {
     if (warning) notes.push(`tar warnings: ${warning.split('\n').slice(0, 3).join(' | ')}`);
     const { size } = await fs.stat(file);
     log(`Saved ${file} (${(size / 1048576).toFixed(1)} MB). Keep the passphrase safe: without it the file cannot be opened.`);
+
+    // Replace: the older backups of THIS account go, but only once the new file is proven to open.
+    const replaced = [];
+    if (replace) {
+      if (await opens(file, passphrase)) {
+        const mine = new RegExp(`^claude-backup-${name}-\\d{8}-\\d{6}(-\\d+)?\\.csbk$`);
+        for (const n of await fs.readdir(folder)) {
+          if (mine.test(n) && path.join(folder, n) !== file) {
+            await fs.rm(path.join(folder, n));
+            replaced.push(n);
+          }
+        }
+        if (replaced.length) log(`Replaced ${replaced.length} older backup(s).`);
+      } else {
+        notes.push('the new backup could not be verified, so the older ones were kept');
+      }
+    }
     console.log(JSON.stringify({
-      ok: true, file, bytes: size, logins: Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, v.ok ? 'saved' : `skipped: ${v.message}`])), notes,
+      ok: true, file, bytes: size, replaced, logins: Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, v.ok ? 'saved' : `skipped: ${v.message}`])), notes,
     }));
   } finally {
     await fs.rm(stage, { recursive: true, force: true }); // symlinks are removed, never followed
@@ -462,7 +488,7 @@ async function apply(file, partsArg, replaceVault) {
 const [cmd, arg, ...rest] = process.argv.slice(2);
 const opt = (f) => (rest.includes(f) ? rest[rest.indexOf(f) + 1] : undefined);
 try {
-  if (cmd === 'backup') await backup(arg, opt('--to'));
+  if (cmd === 'backup') await backup(arg, opt('--to'), rest.includes('--replace'));
   else if (cmd === 'verify') await verify(arg);
   else if (cmd === 'restore') await restore(arg, opt('--out'), rest.includes('--to-vault'), rest.includes('--force'));
   else if (cmd === 'inspect') await inspect(arg);

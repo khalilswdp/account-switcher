@@ -100,11 +100,25 @@ function packConfig(file, key) {
   return { kind: 'config', json: cfg, enc, order };
 }
 
+// A consistent copy of a cookie database that is safe to take while the Claude app is using it:
+// SQLite's own VACUUM INTO over a read-only connection (it waits for a writer's lock instead of
+// reading half-written pages), not a file copy. The live file is never written to.
+function snapshotCookies(file, dest) {
+  const src = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
+  try {
+    src.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
+  } catch (e) {
+    throw new Error(`could not read the cookie file (${e.message.split('\n')[0]}). Try again in a moment.`);
+  } finally {
+    src.close();
+  }
+}
+
 async function packCookies(file, key) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-vault-'));
   const copy = path.join(dir, 'Cookies');
   try {
-    await fs.copyFile(file, copy);
+    snapshotCookies(file, copy);
     const db = new DatabaseSync(copy);
     const version = Number(db.prepare("select value from meta where key='version'").get().value);
     if (!COOKIES.includes('*')) {
@@ -155,7 +169,7 @@ async function fingerprint(source) {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-vault-fp-'));
       try {
         const copy = path.join(dir, 'Cookies');
-        await fs.copyFile(p, copy);
+        snapshotCookies(p, copy);
         const db = new DatabaseSync(copy, { readOnly: true });
         const all = COOKIES.includes('*');
         const rows = db
@@ -273,7 +287,8 @@ async function push(name, force) {
   const isActive = activeName() === name;
   const source = isActive ? activeFolder : parked(name);
   if (!(await exists(source))) fail(`no folder for "${name}" at ${source}`);
-  if (isActive && appRunning()) fail('the Claude app is running and this account is the active one. Quit it (Cmd+Q) first.');
+  // Reading the cookie file is safe while the app runs (see snapshotCookies); only load, which
+  // writes into the folder, needs the app closed.
 
   const remote = await readRemote(name);
   const rev = await lastRev(name);
