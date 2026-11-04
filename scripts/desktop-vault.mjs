@@ -14,13 +14,12 @@
 // folder "Claude.<name>"; switch to it with the dashboard or `desktop-swap.sh use <name>`.
 // On a Mac that has never run the app, open it once and quit first (that creates the key).
 //
-// Only the cookie file is stored by default (about 28 KB): it is all the app needs to start
+// Only the login cookie (sessionKey) is stored by default: it is all the app needs to start
 // signed in. Reading the Keychain item makes macOS ask you to allow it. Nothing secret is
 // ever printed.
 //   VAULT_ALLOWED_ACCOUNTS  comma list, default "test"
 //   DESKTOP_ITEMS           comma list of items to store instead (config.json, "Local Storage", ...)
-//   DESKTOP_COOKIES         comma list of cookie names to keep, default "sessionKey,anthropic-consent-preferences"
-//                           ("*" keeps all of them)
+//   DESKTOP_COOKIES         comma list of cookie names to keep, default "sessionKey" ("*" keeps all)
 import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -39,9 +38,10 @@ const ALLOWED = (process.env.VAULT_ALLOWED_ACCOUNTS || 'test').split(',').map((s
 // Tested on 2026-11-04: the app starts signed in from the Cookies file alone (config.json alone
 // does not). Everything else it rebuilds itself, so only the cookies are stored.
 const ITEMS = (process.env.DESKTOP_ITEMS || 'Cookies').split(',').map((s) => s.trim()).filter(Boolean);
-// Also tested: of the cookies, sessionKey alone signs the app in; anthropic-consent-preferences
-// only stops the cookie banner. Everything else the app recreates. "*" keeps every cookie.
-const COOKIES = (process.env.DESKTOP_COOKIES || 'sessionKey,anthropic-consent-preferences').split(',').map((s) => s.trim()).filter(Boolean);
+// Also tested: of the cookies, sessionKey alone signs the app in. The consent cookie is left
+// out on purpose: it only hides the cookie banner, and a consent choice should be made on
+// each machine, not carried over from another one. "*" keeps every cookie.
+const COOKIES = (process.env.DESKTOP_COOKIES || 'sessionKey').split(',').map((s) => s.trim()).filter(Boolean);
 const MAX_ENTRY = 700_000; // bytes of the stored envelope; Vault's default entry limit is about 1 MiB
 
 const validName = (n) => /^[\w-]+$/.test(n ?? '') || fail('account name may only use letters, digits, - and _');
