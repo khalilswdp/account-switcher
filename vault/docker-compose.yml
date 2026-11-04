@@ -1,0 +1,29 @@
+# Private, persistent Vault for the claude-switcher session backups.
+# Reachable only from this machine (127.0.0.1). Data lives in a named volume.
+# Manage it with:  node scripts/vault-local.mjs <up|init|unseal|token|status|backup|restore|down>
+name: ${COMPOSE_PROJECT_NAME:-claude-switcher-vault}
+
+services:
+  vault:
+    image: hashicorp/vault:2.2.1
+    command: ["server"]
+    restart: unless-stopped # comes back after a reboot, but sealed: run "unseal"
+    ports:
+      - "127.0.0.1:${VAULT_PORT:-8200}:8200"
+    environment:
+      VAULT_LOCAL_CONFIG: |
+        {
+          "ui": false,
+          "disable_mlock": true,
+          "storage": { "raft": { "path": "/vault/file", "node_id": "claude-switcher-local" } },
+          "listener": { "tcp": { "address": "0.0.0.0:8200", "tls_disable": true } },
+          "api_addr": "http://127.0.0.1:8200",
+          "cluster_addr": "http://127.0.0.1:8201",
+          "default_lease_ttl": "768h",
+          "max_lease_ttl": "8760h"
+        }
+    volumes:
+      - vault-data:/vault/file
+
+volumes:
+  vault-data:

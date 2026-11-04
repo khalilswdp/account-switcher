@@ -12,8 +12,8 @@
 // stale copy can stop working. `push` refuses when the vault changed since your last
 // pull or push (use --force to override).
 //
-// Settings (environment):
-//   VAULT_PROVIDER          hashicorp | file            (required)
+// Settings (environment). With the local Vault from scripts/vault-local.mjs none are needed.
+//   VAULT_PROVIDER          hashicorp | file            (default: hashicorp when the local token exists)
 //   VAULT_ALLOWED_ACCOUNTS  comma list, default "test"  (accounts this tool may touch)
 //   VAULT_ADDR, VAULT_TOKEN hashicorp: server URL and a token that may read/write the path
 //   VAULT_MOUNT             hashicorp KV v2 mount, default "secret"
@@ -27,8 +27,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-const PROVIDER = process.env.VAULT_PROVIDER;
-const VAULT_ADDR = (process.env.VAULT_ADDR || '').replace(/\/+$/, '');
+// The local Vault set up by scripts/vault-local.mjs leaves a limited token here; when it
+// exists, the helper uses the local Vault with no settings at all.
+const LOCAL_DIR = process.env.VAULT_LOCAL_DIR || path.join(os.homedir(), '.claude-switcher-vault');
+const LOCAL_TOKEN = (() => {
+  try {
+    return readFileSync(path.join(LOCAL_DIR, 'token'), 'utf8').trim();
+  } catch {
+    return '';
+  }
+})();
+const PROVIDER = process.env.VAULT_PROVIDER || (LOCAL_TOKEN ? 'hashicorp' : undefined);
+const VAULT_ADDR = (process.env.VAULT_ADDR || (PROVIDER === 'hashicorp' && LOCAL_TOKEN ? 'http://127.0.0.1:8200' : '')).replace(/\/+$/, '');
 const MOUNT = process.env.VAULT_MOUNT || 'secret';
 const PREFIX = (process.env.VAULT_PATH_PREFIX || 'claude-switcher').replace(/^\/+|\/+$/g, '');
 const FILE_DIR = process.env.VAULT_FILE_DIR;
@@ -103,8 +113,8 @@ const providers = {
 };
 
 function vaultFetch(id, init) {
-  const token = process.env.VAULT_TOKEN;
-  if (!VAULT_ADDR || !token) fail('set VAULT_ADDR and VAULT_TOKEN for the hashicorp provider');
+  const token = process.env.VAULT_TOKEN || LOCAL_TOKEN;
+  if (!VAULT_ADDR || !token) fail('set VAULT_ADDR and VAULT_TOKEN, or set up the local Vault: node scripts/vault-local.mjs init');
   const { protocol, hostname } = new URL(VAULT_ADDR);
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(hostname);
   if (protocol !== 'https:' && !local && !process.env.VAULT_ALLOW_INSECURE) {
@@ -117,7 +127,8 @@ function vaultFetch(id, init) {
 }
 
 function vaultError(res) {
-  if (res.status === 403) return new Error('Vault denied access (HTTP 403): check VAULT_TOKEN and its policy');
+  if (res.status === 403) return new Error('Vault denied access (HTTP 403): the token is wrong, expired or lacks the policy (local Vault: node scripts/vault-local.mjs token)');
+  if (res.status === 503) return new Error('Vault is sealed (local Vault: node scripts/vault-local.mjs unseal)');
   return new Error(`Vault answered HTTP ${res.status}`);
 }
 
