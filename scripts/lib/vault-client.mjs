@@ -1,4 +1,4 @@
-// Shared Vault access for scripts/vault.mjs and scripts/desktop-vault.mjs.
+// Shared Vault access for the scripts (desktop-vault, cli-vault, vault-list, backup).
 // Providers store one opaque string per id (the id may contain "/"): HashiCorp Vault (KV v2
 // over HTTP, no CLI needed) and a plaintext file provider for tests.
 //

@@ -6,7 +6,6 @@ import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
 
 // Optional settings file in the project folder (gitignored); real environment variables win.
 try {
@@ -18,21 +17,12 @@ try {
 const run = promisify(execFile);
 
 const PORT = Number(process.env.PORT) || 3000;
-const LOGIN_URL = process.env.LOGIN_URL || 'https://claude.ai/login';
-const TASK_URL = process.env.TASK_URL || 'https://claude.ai/';
-const SESSION_COOKIE = process.env.SESSION_COOKIE_NAME || 'sessionKey'; // the cookie that means "signed in to claude.ai"
-const PROFILES_DIR = process.env.PROFILES_DIR || '.profiles';
-const BACKUP_DIR = process.env.BACKUP_DIR || '.backups'; // storageState safety copies
-const LEGACY_DIR = process.env.LEGACY_STATE_DIR || '.state'; // sessions from the earlier version
 const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || 'accounts.json';
-const MARKER = '.synced'; // written once a login window has been saved/closed
-
-// One persistent Chromium profile per account. The profile folder IS the session:
-// cookies, localStorage, IndexedDB and refreshed tokens live there natively, so
-// switching accounts means opening the other folder. Nothing is copied or replayed.
-// Accounts added from the Vault (not in accounts.json) are remembered here; gitignored.
+// Accounts added on the page or from the Vault (not in accounts.json) are remembered here; gitignored.
 const LOCAL_ACCOUNTS_FILE = process.env.LOCAL_ACCOUNTS_FILE || '.accounts.local.json';
 
+// Two surfaces per account: the Claude desktop app (its data folder is renamed into place by
+// scripts/desktop-swap.sh) and Claude Code (its own config folder and Keychain login).
 function makeAccount(id, label, cliConfigDir) {
   if (!/^[\w-]+$/.test(id ?? '') || id === '__proto__') throw new Error(`Invalid account id: ${id}`);
   if (cliConfigDir != null && !/^(~\/|\/)[\w./-]+$/.test(cliConfigDir)) {
@@ -43,9 +33,6 @@ function makeAccount(id, label, cliConfigDir) {
     // Claude Code config folder: "main" uses the default (~/.claude), every other account uses
     // ~/.claude-<name>, unless accounts.json names a folder.
     cliConfigDir: cliConfigDir ?? (id === 'main' ? null : `~/.claude-${id}`),
-    profileDir: path.join(PROFILES_DIR, id),
-    backupFile: path.join(BACKUP_DIR, `${id}.json`),
-    legacyState: path.join(LEGACY_DIR, `${id}_account.json`),
   };
 }
 
@@ -76,285 +63,18 @@ function loadAccounts() {
 }
 const ACCOUNTS = loadAccounts();
 
-// mode: idle | busy (task running) | login (headed window open)
-const newRuntime = () => ({ mode: 'idle', visual: null, lastResult: null, loggedOut: false, challenged: false });
-const runtime = Object.fromEntries(Object.keys(ACCOUNTS).map((id) => [id, newRuntime()]));
-
-// Makes an account that exists in the Vault but not on this Mac a local one, so its card,
-// profile and folders can be created. Remembered in the local accounts file.
-async function registerAccount(id) {
+// Makes an account local: one that exists in the Vault but not on this Mac, or a new one made on
+// the page. It gets a card; its folders are created as its parts are signed in or loaded.
+// Remembered in the local accounts file.
+async function registerAccount(id, label = '') {
   if (ACCOUNTS[id]) return;
-  ACCOUNTS[id] = makeAccount(id, `Account: ${id}`);
-  runtime[id] = newRuntime();
+  ACCOUNTS[id] = makeAccount(id, label.trim().slice(0, 80) || `Account: ${id}`);
   const list = readList(LOCAL_ACCOUNTS_FILE) ?? [];
   list.push({ id, label: ACCOUNTS[id].label });
   await fs.writeFile(LOCAL_ACCOUNTS_FILE, `${JSON.stringify(list, null, 2)}\n`, { mode: 0o600 });
 }
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
-const markerFile = (id) => path.join(ACCOUNTS[id].profileDir, MARKER);
-const importedFlag = (id) => path.join(PROFILES_DIR, `.imported-${id}`); // survives a profile reset
-const isReady = (id) => fs.access(markerFile(id)).then(() => true, () => false);
-
-async function markReady(id) {
-  const now = new Date().toISOString();
-  await fs.mkdir(ACCOUNTS[id].profileDir, { recursive: true });
-  await fs.writeFile(markerFile(id), now, { mode: 0o600 });
-  await fs.writeFile(importedFlag(id), now, { mode: 0o600 });
-  runtime[id].loggedOut = false;
-}
-
-// A page counts as logged out when it ended up on a login route.
-const LOGGED_OUT = /\/(login|log-in|signin|sign-in|logout)(\/|$)/i;
-const CHALLENGE = /just a moment/i; // Cloudflare interstitial: says nothing about the session
-function looksLoggedIn(url) {
-  try {
-    const u = new URL(url);
-    return /^https?:$/.test(u.protocol) && !LOGGED_OUT.test(u.pathname);
-  } catch {
-    return false;
-  }
-}
-
-// Safety copy of the session as storageState JSON (atomic, owner-only). Only taken
-// when the session looks logged in, so a good backup is never replaced by a bad one.
-async function saveBackup(id, context) {
-  const file = ACCOUNTS[id].backupFile;
-  const tmp = `${file}.tmp`;
-  try {
-    await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-    await context.storageState({ path: tmp });
-    await fs.chmod(tmp, 0o600);
-    await fs.rename(tmp, file);
-  } catch (e) {
-    console.warn(`[${id}] Backup failed: ${e.message.split('\n')[0]}`);
-  }
-}
-
-// A profile directory can only be open in one browser at a time. The mode flag
-// guarantees that: a task and a login window never share an account.
-const open = (id, headless) =>
-  chromium.launchPersistentContext(ACCOUNTS[id].profileDir, {
-    headless,
-    viewport: headless ? undefined : null,
-  });
-
-// Writes the profile's CURRENT session to .backups/<id>.json, which is what the Vault push and the
-// full backup read. The profile is the source of truth, so saving never depends on a task having
-// run earlier (that used to be the only thing that wrote this file).
-async function exportSession(id) {
-  const rt = runtime[id];
-  if (rt.mode !== 'idle') throw httpError(409, `the account is busy (${rt.mode}), try again in a moment`);
-  if (!(await isReady(id))) throw httpError(409, 'the browser profile is not signed in yet: use "Login / Sync Session" first');
-  rt.mode = 'busy';
-  let context;
-  try {
-    context = await open(id, true);
-    const state = await context.storageState();
-    if (!state.cookies.some((c) => c.name === SESSION_COOKIE)) {
-      throw httpError(409, 'the browser profile is not signed in to claude.ai: use "Login / Sync Session" first');
-    }
-    await saveBackup(id, context);
-  } finally {
-    await context?.close().catch(() => {});
-    rt.mode = 'idle';
-  }
-}
-
-// -------------------------------------------------------- startup housekeeping
-
-// A crash can leave Chromium's Singleton* lock files behind, which makes the next
-// launch of that profile fail. Remove them unless a browser really uses the profile.
-async function clearStaleLocks() {
-  let processes;
-  try {
-    processes = (await run('ps', ['-axo', 'command'], { maxBuffer: 32 * 1024 * 1024 })).stdout;
-  } catch {
-    return; // cannot tell: leave locks alone
-  }
-  for (const [id, a] of Object.entries(ACCOUNTS)) {
-    const dir = path.resolve(a.profileDir);
-    if (processes.includes(`--user-data-dir=${dir}`)) continue;
-    for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
-      const p = path.join(dir, name);
-      if (await fs.lstat(p).then(() => true, () => false)) {
-        await fs.rm(p, { force: true });
-        console.log(`[${id}] Removed stale ${name}`);
-      }
-    }
-  }
-}
-
-// One-time import for a profile that was never set up: prefer the newest backup,
-// then the earlier .state/*.json. Sources are only read, never modified or deleted.
-// Token values are never logged.
-async function importLegacy(id) {
-  const rt = runtime[id];
-  const a = ACCOUNTS[id];
-  if ((await isReady(id)) || (await fs.access(importedFlag(id)).then(() => true, () => false))) return;
-
-  let state;
-  let source;
-  for (const file of [a.backupFile, a.legacyState]) {
-    try {
-      const s = JSON.parse(await fs.readFile(file, 'utf8'));
-      if (s.cookies?.length) {
-        state = s;
-        source = file;
-        break;
-      }
-    } catch {}
-  }
-  if (!state) return;
-
-  rt.mode = 'busy';
-  try {
-    await applyState(id, state);
-    await markReady(id);
-    console.log(`[${id}] Imported existing session from ${path.basename(source)} (${state.cookies.length} cookies)`);
-  } catch (e) {
-    console.error(`[${id}] Session import failed: ${e.message.split('\n')[0]}`);
-  } finally {
-    rt.mode = 'idle';
-  }
-}
-
-// Writes a saved session (storageState JSON) into the account's profile: cookies replace
-// ones with the same name, the rest of the profile is left alone. The caller holds the
-// account (mode flag), because a profile can only be open in one browser at a time.
-async function applyState(id, state) {
-  let context;
-  try {
-    await fs.mkdir(ACCOUNTS[id].profileDir, { recursive: true });
-    context = await open(id, true);
-    await context.addCookies(state.cookies);
-    for (const { origin, localStorage: items = [] } of state.origins ?? []) {
-      if (!items.length) continue;
-      const page = await context.newPage();
-      // Serve a blank page for the origin so no network request is made.
-      await page.route('**/*', (r) => r.fulfill({ contentType: 'text/html', body: '<html></html>' }));
-      try {
-        await page.goto(origin);
-        await page.evaluate((kv) => kv.forEach(({ name, value }) => localStorage.setItem(name, value)), items);
-      } catch {}
-      await page.close();
-    }
-  } finally {
-    await context?.close().catch(() => {}); // closing flushes the profile to disk
-  }
-}
-
-// ------------------------------------------------ headless (automated) side
-
-async function runTask(id) {
-  const rt = runtime[id];
-  if (rt.mode !== 'idle') throw httpError(409, `Account is busy (${rt.mode})`);
-  rt.mode = 'busy'; // claim synchronously so double clicks cannot race
-  let context;
-  try {
-    if (!(await isReady(id))) throw httpError(409, 'Not logged in: use "Login / Sync Session" first');
-    context = await open(id, true);
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(TASK_URL, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-    const title = await page.title();
-    // true / false, or null when a bot challenge hides the real answer
-    const loggedIn = CHALLENGE.test(title) ? null : looksLoggedIn(page.url());
-    const result = {
-      account: id,
-      title,
-      url: page.url(),
-      loggedIn,
-      challenged: CHALLENGE.test(title), // Cloudflare's bot check answered, not Claude
-      cookies: (await context.cookies()).length,
-      at: new Date().toISOString(),
-    };
-    rt.challenged = result.challenged;
-    if (loggedIn !== null) rt.loggedOut = !loggedIn;
-    if (loggedIn === true) await saveBackup(id, context);
-    rt.lastResult = result;
-    return result;
-  } finally {
-    await context?.close().catch(() => {}); // closing flushes the profile to disk
-    rt.mode = 'idle';
-  }
-}
-
-// ----------------------------------------------- headed (interactive) side
-
-async function startLogin(id) {
-  const rt = runtime[id];
-  if (rt.mode !== 'idle') throw httpError(409, `Account is busy (${rt.mode})`);
-  rt.mode = 'login'; // automated tasks are blocked for this account from here on
-  let context;
-  try {
-    await fs.mkdir(ACCOUNTS[id].profileDir, { recursive: true });
-    context = await open(id, false);
-    const session = { context, closing: false };
-    rt.visual = session;
-
-    // The profile saves itself, so closing the window by hand also counts as a save.
-    context.on('close', async () => {
-      if (session.closing) return;
-      session.closing = true;
-      rt.visual = null;
-      await markReady(id).catch(() => {});
-      rt.mode = 'idle';
-    });
-    // Closing the last tab is treated as "Save Session".
-    const watch = (p) =>
-      p.on('close', () => {
-        if (!session.closing && context.pages().length === 0) endLogin(id).catch(() => {});
-      });
-    context.pages().forEach(watch);
-    context.on('page', watch);
-
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    // If Cloudflare's bot check is what opened, say so on the card (the person can tick its box).
-    rt.challenged = CHALLENGE.test(await page.title().catch(() => ''));
-  } catch (e) {
-    await context?.close().catch(() => {});
-    rt.visual = null;
-    rt.mode = 'idle';
-    throw e;
-  }
-}
-
-async function endLogin(id) {
-  const rt = runtime[id];
-  const s = rt.visual;
-  if (!s || s.closing) throw httpError(409, 'No open login window for this account');
-  s.closing = true;
-  try {
-    // Back up only if some tab is on a non-login page (the user is signed in).
-    if (s.context.pages().some((p) => looksLoggedIn(p.url()))) await saveBackup(id, s.context);
-    await s.context.close(); // flushes cookies and storage to the profile folder
-    await markReady(id);
-  } finally {
-    rt.visual = null;
-    rt.mode = 'idle';
-  }
-  return { saved: true };
-}
-
-// Wipes one account's profile and its backup. The old .state files are left alone,
-// and the imported flag stops them from being re-imported on the next start.
-async function resetProfile(id) {
-  const rt = runtime[id];
-  if (rt.mode !== 'idle') throw httpError(409, `Account is busy (${rt.mode})`);
-  rt.mode = 'busy';
-  try {
-    await fs.rm(ACCOUNTS[id].profileDir, { recursive: true, force: true });
-    await fs.rm(ACCOUNTS[id].backupFile, { force: true });
-    await fs.mkdir(PROFILES_DIR, { recursive: true });
-    await fs.writeFile(importedFlag(id), new Date().toISOString(), { mode: 0o600 });
-    rt.lastResult = null;
-    rt.loggedOut = false;
-  } finally {
-    rt.mode = 'idle';
-  }
-  return { ok: true };
-}
 
 // ------------------------------------------------- Claude Code (CLI) launcher
 
@@ -401,7 +121,8 @@ async function desktopState() {
   const { stdout } = await run('bash', [SWAP_SCRIPT, 'list']);
   const state = { supported: true, active: null, parked: [], running: false };
   for (const line of stdout.trim().split('\n')) {
-    const [key, value] = line.split(' ');
+    const sp = line.indexOf(' ');
+    const [key, value] = sp < 0 ? [line, ''] : [line.slice(0, sp), line.slice(sp + 1)];
     if (key === 'active' && value !== '-') state.active = value;
     else if (key === 'parked') state.parked.push(value);
     else if (key === 'running') state.running = value === 'yes';
@@ -433,7 +154,7 @@ async function switchDesktop(name) {
   switching = true;
   try {
     const state = await desktopState();
-    if (!state.active) throw httpError(409, 'Not set up. In Terminal run: ./scripts/desktop-swap.sh init <account-now-signed-in>');
+    if (!state.active) throw httpError(409, 'Not set up: first say which account the Claude app is signed in as (at the top of the dashboard)');
     if (name === state.active) return { ok: true, active: name, note: 'already active' };
     if (!state.parked.includes(name)) throw httpError(404, `No parked desktop account named ${name}`);
 
@@ -450,11 +171,49 @@ async function switchDesktop(name) {
   }
 }
 
+// First run: the app's current data folder becomes account <id>. Nothing is moved.
+async function initDesktop(id) {
+  guardDesktopApp();
+  const state = await desktopState();
+  if (state.active) throw httpError(409, `Already set up: the Claude app is on "${state.active}"`);
+  try {
+    await run('bash', [SWAP_SCRIPT, 'init', id]);
+  } catch (e) {
+    throw httpError(500, failText(e));
+  }
+  return { ok: true, active: id };
+}
+
+// Sign in to another account by hand: the current data folder is parked under the active
+// account's name and the app is reopened empty, showing its sign-in page. The person signs in
+// as <id>; from then on that folder is account <id>.
+async function newDesktopAccount(id) {
+  guardDesktopApp();
+  if (switching) throw httpError(409, 'A desktop switch is already in progress');
+  switching = true;
+  try {
+    const state = await desktopState();
+    if (!state.active) throw httpError(409, 'Not set up: first say which account the Claude app is signed in as (at the top of the dashboard)');
+    if (id === state.active) throw httpError(409, 'The Claude app is already on this account');
+    if (state.parked.includes(id)) throw httpError(409, 'This account already has app data: switch to it instead');
+    if (state.running) await quitDesktopApp();
+    try {
+      await run('bash', [SWAP_SCRIPT, 'new', id]);
+    } catch (e) {
+      if (state.running) await openDesktopApp();
+      throw httpError(500, failText(e));
+    }
+    await openDesktopApp(); // opens signed out, ready for the sign-in
+    return { ok: true, active: id, parked: state.active };
+  } finally {
+    switching = false;
+  }
+}
+
 // ------------------------------------------------------- Save to the Vault
 
-// One click saves the minimum needed to run the account on another laptop: the desktop
-// login cookie and, if there is one, the browser session. The two scripts do the work and
-// never print secret values, so only their first output line is passed on.
+// The two scripts do the work and never print secret values, so only their first output line is
+// passed on.
 const PROJECT_DIR = fileURLToPath(new URL('..', import.meta.url));
 let vaulting = false;
 
@@ -472,24 +231,19 @@ async function runScript(script, args) {
   }
 }
 
-const PARTS = ['desktop', 'browser', 'cli'];
+const PARTS = ['desktop', 'cli'];
 
-// parts: which of the three to save. The dashboard saves one at a time; no parts means all.
-async function saveToVault(id, parts = PARTS) {
+// parts: which of the two to save. The dashboard saves one at a time; no parts means both.
+// force: replace a Vault copy that was saved from another Mac since this one last synced (the
+// scripts refuse that by default; the dashboard asks first, then retries with force).
+async function saveToVault(id, parts = PARTS, force = false) {
   if (vaulting) throw httpError(409, 'A Vault save is already in progress');
   vaulting = true;
+  const args = force ? ['push', id, '--force'] : ['push', id];
   try {
     const out = {};
-    if (parts.includes('desktop')) out.desktop = await runScript('desktop-vault.mjs', ['push', id]); // may show the Keychain prompt
-    if (parts.includes('browser')) {
-      try {
-        await exportSession(id); // refresh .backups/<id>.json from the profile first
-        out.browser = await runScript('vault.mjs', ['push', id]);
-      } catch (e) {
-        out.browser = { ok: false, message: e.message };
-      }
-    }
-    if (parts.includes('cli')) out.cli = await runScript('cli-vault.mjs', ['push', id]); // may show the Keychain prompt
+    if (parts.includes('desktop')) out.desktop = await runScript('desktop-vault.mjs', args); // may show the Keychain prompt
+    if (parts.includes('cli')) out.cli = await runScript('cli-vault.mjs', args); // may show the Keychain prompt
     return out;
   } finally {
     vaulting = false;
@@ -510,7 +264,7 @@ async function loadDesktop(id) {
   switching = true;
   try {
     const state = await desktopState();
-    if (!state.active) throw httpError(409, 'Not set up. In Terminal run: ./scripts/desktop-swap.sh init <account-now-signed-in>');
+    if (!state.active) throw httpError(409, 'Not set up: first say which account the Claude app is signed in as (at the top of the dashboard)');
     if (state.running) await quitDesktopApp();
 
     const r = await runScript('desktop-vault.mjs', ['load', id]); // may show the Keychain prompt
@@ -535,24 +289,6 @@ async function loadDesktop(id) {
   }
 }
 
-// Browser: replace cookies in the account's profile with the saved session.
-async function loadBrowser(id) {
-  const rt = runtime[id];
-  if (rt.mode !== 'idle') throw httpError(409, `Account is busy (${rt.mode})`);
-  rt.mode = 'busy';
-  try {
-    const r = await runScript('vault.mjs', ['pull', id, '--force']); // writes .backups/<id>.json
-    if (!r.ok) throw httpError(500, r.message);
-    const state = JSON.parse(await fs.readFile(ACCOUNTS[id].backupFile, 'utf8'));
-    await applyState(id, state);
-    await markReady(id);
-    rt.loggedOut = false;
-    return { ok: true, message: `Loaded the saved browser session (${state.cookies.length} cookies) into the "${id}" profile.` };
-  } finally {
-    rt.mode = 'idle';
-  }
-}
-
 // CLI: replace this Mac's Claude Code login for the account, then open Terminal as it.
 async function loadCli(id) {
   const r = await runScript('cli-vault.mjs', ['pull', id, '--replace']); // may show the Keychain prompt
@@ -561,7 +297,7 @@ async function loadCli(id) {
   return { ok: true, message: `${r.message} Opened Terminal as this account.` };
 }
 
-const LOADERS = { desktop: loadDesktop, browser: loadBrowser, cli: loadCli };
+const LOADERS = { desktop: loadDesktop, cli: loadCli };
 
 // What is in the Vault for one account, per part. Counts and times only, never values.
 async function scriptStatus(script, id) {
@@ -575,12 +311,8 @@ async function scriptStatus(script, id) {
 }
 
 async function vaultStatus(id) {
-  const [desktop, browser, cli] = await Promise.all([
-    scriptStatus('desktop-vault.mjs', id),
-    scriptStatus('vault.mjs', id),
-    scriptStatus('cli-vault.mjs', id),
-  ]);
-  return { desktop, browser, cli };
+  const [desktop, cli] = await Promise.all([scriptStatus('desktop-vault.mjs', id), scriptStatus('cli-vault.mjs', id)]);
+  return { desktop, cli };
 }
 
 // ----------------------------------------------------------- Full backup
@@ -610,7 +342,6 @@ function runWithStdin(script, args, input, timeoutMs) {
 async function backupAccount(id, folder, passphrase, replace = false) {
   if (typeof passphrase !== 'string' || passphrase.length < 12) throw httpError(400, 'the passphrase must be at least 12 characters');
   if (typeof folder !== 'string' || !folder.trim()) throw httpError(400, 'choose a folder for the backup file');
-  await exportSession(id).catch(() => {}); // best effort: put the profile's current session where the backup reads it
   return runBackupTool(['backup', id, '--to', folder.trim(), ...(replace ? ['--replace'] : [])], passphrase);
 }
 
@@ -680,8 +411,23 @@ const backupFile = (file) => {
 
 const app = express();
 
-// A web page must not be able to open browser windows: reject cross-site POSTs.
+// Only this Mac's own browser may talk to the server. The Host check stops DNS rebinding (a web
+// page on some-site.com whose name is pointed at 127.0.0.1); the Origin check stops cross-site
+// POSTs. Both matter: a POST here can quit the Claude app or read a login.
+const BUILD = new Date().toISOString(); // the page reloads itself when this changes (server restarted)
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+const hostOf = (value) => {
+  try {
+    return new URL(`http://${value}`).hostname;
+  } catch {
+    return null;
+  }
+};
 app.use((req, res, next) => {
+  res.set('X-Dashboard-Build', BUILD);
+  if (!LOCAL_HOSTS.has(hostOf(req.headers.host ?? ''))) {
+    return res.status(403).json({ error: `Open the dashboard at http://127.0.0.1:${PORT}` });
+  }
   if (req.method === 'POST' && req.headers.origin) {
     let host;
     try {
@@ -698,39 +444,36 @@ app.param('id', (req, res, next, id) =>
   Object.hasOwn(ACCOUNTS, id) ? next() : res.status(404).json({ error: `Unknown account ${id}` }),
 );
 
-app.get('/api/accounts', async (req, res) => {
-  const list = await Promise.all(
-    Object.entries(ACCOUNTS).map(async ([id, a]) => {
-      const { mode, lastResult, loggedOut, challenged } = runtime[id];
-      let status = mode;
-      if (mode === 'idle') {
-        if (!(await isReady(id))) status = 'not_logged_in';
-        else status = loggedOut ? 'login_required' : 'ready';
-      }
-      return { id, label: a.label, status, lastResult, challenged, cliConfigDir: a.cliConfigDir };
-    }),
-  );
-  res.json(list);
+const accountList = () => Object.entries(ACCOUNTS).map(([id, a]) => ({ id, label: a.label, cliConfigDir: a.cliConfigDir }));
+app.get('/api/accounts', (req, res) => res.json(accountList()));
+// Everything the page polls, in one answer.
+app.get('/api/state', async (req, res) => res.json({ build: BUILD, accounts: accountList(), desktop: { ...(await desktopState()), switching } }));
+
+// A new account made on the page. Nothing is signed in yet; the card's rows take it from there.
+app.post('/api/accounts', express.json({ limit: '4kb' }), async (req, res) => {
+  const id = String(req.body?.id ?? '').trim();
+  if (!/^[\w-]{1,40}$/.test(id) || id === '__proto__') throw httpError(400, 'the short name may only use letters, digits, - and _');
+  if (ACCOUNTS[id]) throw httpError(409, `"${id}" already exists on this Mac`);
+  await registerAccount(id, String(req.body?.label ?? ''));
+  res.json({ ok: true, account: id, label: ACCOUNTS[id].label });
 });
 
-app.post('/api/accounts/:id/login', async (req, res) => {
-  await startLogin(req.params.id);
-  res.json({ ok: true });
-});
-app.post('/api/accounts/:id/save', async (req, res) => res.json(await endLogin(req.params.id)));
-app.post('/api/accounts/:id/task', async (req, res) => res.json(await runTask(req.params.id)));
 app.get('/api/desktop', async (req, res) => res.json({ ...(await desktopState()), switching }));
 app.post('/api/desktop/switch/:name', async (req, res) => {
   if (!/^[\w-]+$/.test(req.params.name)) throw httpError(404, 'Invalid account name');
   res.json(await switchDesktop(req.params.name));
 });
+app.post('/api/desktop/init/:id', async (req, res) => res.json(await initDesktop(req.params.id)));
+app.post('/api/desktop/new/:id', async (req, res) => res.json(await newDesktopAccount(req.params.id)));
+app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
+
 app.get('/api/accounts/:id/vault', async (req, res) => res.json(await vaultStatus(req.params.id)));
 app.post('/api/accounts/:id/vault', async (req, res) => {
   const wanted = String(req.query.parts ?? PARTS.join(',')).split(',').filter(Boolean);
   if (!wanted.length || wanted.some((p) => !PARTS.includes(p))) {
     throw httpError(400, `parts must be ${PARTS.join(' and/or ')}`);
   }
-  res.json(await saveToVault(req.params.id, wanted));
+  res.json(await saveToVault(req.params.id, wanted, req.query.force === '1'));
 });
 async function loadPart(id, part) {
   const load = LOADERS[part];
@@ -743,7 +486,6 @@ async function loadPart(id, part) {
     vaulting = false;
   }
 }
-
 app.post('/api/accounts/:id/vault/load', async (req, res) => res.json(await loadPart(req.params.id, String(req.query.part))));
 
 // Which accounts exist in the Vault, and which parts of each (names and times only).
@@ -756,19 +498,17 @@ async function vaultAccounts() {
 }
 app.get('/api/vault/accounts', async (req, res) => res.json(await vaultAccounts()));
 
-// Load a part of an account that is picked from the Vault. If it is not an account on this Mac
-// yet, it becomes one first (its folders and profile are created by the load itself).
-app.post('/api/vault/load', async (req, res) => {
+// Give an account that exists only in the Vault a card on this Mac, so its parts can be loaded.
+app.post('/api/vault/add', express.json({ limit: '4kb' }), async (req, res) => {
   const id = String(req.query.account ?? '');
-  const part = String(req.query.part ?? '');
   if (!/^[\w-]+$/.test(id)) throw httpError(400, 'invalid account name');
-  if (!LOADERS[part]) throw httpError(400, `part must be one of ${Object.keys(LOADERS).join(', ')}`);
   const entry = (await vaultAccounts()).accounts[id];
-  if (!entry?.[part]) throw httpError(404, `"${id}" has no ${part} entry in the Vault`);
-  if (!entry.allowed) throw httpError(403, `"${id}" is not enabled on this machine (VAULT_ALLOWED_ACCOUNTS)`);
-  await registerAccount(id);
-  res.json({ ...(await loadPart(id, part)), account: id });
+  if (!entry) throw httpError(404, `"${id}" is not in the Vault`);
+  if (!entry.allowed) throw httpError(403, `"${id}" is not enabled on this Mac (VAULT_ALLOWED_ACCOUNTS in .env)`);
+  await registerAccount(id, String(req.body?.label ?? ''));
+  res.json({ ok: true, account: id });
 });
+
 app.post('/api/accounts/:id/backup', express.json({ limit: '16kb' }), async (req, res) =>
   res.json(await backupAccount(req.params.id, req.body?.folder, req.body?.passphrase, req.body?.replace === true)),
 );
@@ -790,31 +530,14 @@ app.post('/api/backup/restore', express.json({ limit: '16kb' }), async (req, res
   }
   res.json(await runBackupTool(['apply', backupFile(file), '--parts', parts.join(','), ...(replaceVault ? ['--replace-vault'] : [])], passphrase));
 });
-app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
-app.post('/api/accounts/:id/reset', async (req, res) => res.json(await resetProfile(req.params.id)));
 
-app.use((err, req, res, next) => res.status(err.status || 500).json({ error: err.message.split('\n')[0] }));
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' })); // lets the page tell an old server from a failure
+app.use((err, req, res, next) => res.status(err.status || 500).json({ error: String(err?.message ?? err).split('\n')[0] }));
 
-await clearStaleLocks();
-await Promise.all(Object.keys(ACCOUNTS).map(importLegacy));
-
-const server = app.listen(PORT, '127.0.0.1', (err) => {
-  if (err) {
-    console.error(`Cannot listen on port ${PORT}: ${err.message}`);
-    process.exit(1);
-  }
-  console.log(`Dashboard on http://127.0.0.1:${PORT}`);
+const server = app.listen(PORT, '127.0.0.1', () => console.log(`Dashboard on http://127.0.0.1:${PORT}`));
+server.on('error', (err) => {
+  console.error(err.code === 'EADDRINUSE'
+    ? `Port ${PORT} is already in use: is the dashboard already running? Open http://127.0.0.1:${PORT}, or start this one with another PORT.`
+    : `Cannot listen on port ${PORT}: ${err.message}`);
+  process.exit(1);
 });
-
-async function shutdown() {
-  for (const rt of Object.values(runtime)) {
-    if (rt.visual) {
-      rt.visual.closing = true;
-      await rt.visual.context.close().catch(() => {}); // flush the profile
-    }
-  }
-  server.close();
-  process.exit(0);
-}
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);

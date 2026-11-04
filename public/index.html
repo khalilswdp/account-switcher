@@ -3,106 +3,250 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Account Profiles</title>
-  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
-  <script>tailwind.config = { darkMode: 'media' };</script>
+  <title>Claude accounts</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f4f5; --panel: #ffffff; --line: #e4e4e7; --soft: #f4f4f5;
+      --text: #18181b; --muted: #6b6b75;
+      --accent: #6d28d9; --accent-hover: #5b21b6; --on-accent: #ffffff; --focus: #8b5cf6;
+      --ok: #047857; --warn: #b45309; --warn-bg: #fef3c7; --danger: #be123c; --danger-bg: #ffe4e6;
+      --log-bg: #1c1c21; --log-text: #d4d4d8; --log-error: #fda4af;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0c0c0e; --panel: #18181b; --line: #2a2a30; --soft: #232329;
+        --text: #f4f4f5; --muted: #a1a1aa;
+        --accent: #7c3aed; --accent-hover: #8b5cf6;
+        --ok: #34d399; --warn: #fbbf24; --warn-bg: rgba(251, 191, 36, .12); --danger: #fb7185; --danger-bg: rgba(251, 113, 133, .12);
+        --log-bg: #000000; --log-text: #d4d4d8; --log-error: #fda4af;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    main { max-width: 58rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+    h1 { font-size: 1.3rem; margin: 0; }
+    h2 { font-size: .95rem; margin: 0; }
+    p { margin: 0; }
+    ul { margin: .5rem 0 0; padding-left: 1.2rem; }
+    li + li { margin-top: .3rem; }
+    .lede { color: var(--muted); margin-top: .3rem; max-width: 48rem; }
+    .muted { color: var(--muted); }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: .6rem; padding: 1rem; }
+    .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+    .topbar { margin-top: 1.25rem; display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; align-items: center; justify-content: space-between; }
+    .strip { display: flex; flex-wrap: wrap; gap: .25rem 1.5rem; font-size: .85rem; }
+    .strip b { font-weight: 600; }
+    .setup { margin-top: 1rem; border-color: var(--warn); }
+    .setup .row { margin-top: .75rem; }
+    #vault-only { margin-top: 1rem; }
+    .vault-only-row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .5rem; font-size: .85rem; }
+    .vault-only-row .name { font-weight: 600; }
+
+    .btn { font: inherit; font-size: .85rem; font-weight: 500; padding: .4rem .75rem; border-radius: .45rem; border: 1px solid transparent; background: transparent; color: inherit; cursor: pointer; line-height: 1.2; white-space: nowrap; }
+    .btn:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: var(--on-accent); }
+    .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
+    .btn-outline { border-color: var(--line); }
+    .btn-outline:not(:disabled):hover { background: var(--soft); }
+    .btn-quiet { color: var(--muted); padding: .3rem .5rem; }
+    .btn-quiet:not(:disabled):hover { color: var(--text); background: var(--soft); }
+    .btn-danger { color: var(--danger); }
+    .btn-danger:not(:disabled):hover { color: var(--danger); background: var(--danger-bg); }
+    .btn-danger-solid { background: var(--danger); color: #fff; }
+    .btn-sm { font-size: .75rem; padding: .2rem .45rem; }
+
+    .cards { margin-top: 1rem; display: grid; gap: 1rem; }
+    @media (min-width: 780px) { .cards { grid-template-columns: 1fr 1fr; } }
+    .card > header { display: flex; justify-content: space-between; gap: .5rem; align-items: flex-start; }
+    .card .id { color: var(--muted); font-size: .75rem; margin-top: .15rem; }
+    .chip { font-size: .7rem; font-weight: 600; padding: .2rem .55rem; border-radius: 999px; white-space: nowrap; }
+    .chip-ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+    .surface { border-top: 1px solid var(--line); margin-top: .75rem; padding-top: .6rem; }
+    .surface-row { display: flex; justify-content: space-between; gap: .5rem .75rem; align-items: center; flex-wrap: wrap; }
+    .surface-head { min-width: 0; }
+    .surface-name { font-weight: 600; font-size: .8rem; }
+    .surface-state { font-size: .8rem; }
+    .surface-actions { display: flex; gap: .4rem; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
+    .surface-vault { margin-top: .35rem; display: flex; gap: .15rem .4rem; align-items: center; flex-wrap: wrap; font-size: .75rem; color: var(--muted); }
+    .note { margin-top: .5rem; padding: .5rem .6rem; border-radius: .4rem; font-size: .8rem; background: var(--warn-bg); color: var(--warn); }
+    .busy { margin-top: .75rem; font-size: .8rem; color: var(--accent); display: flex; gap: .5rem; align-items: center; }
+    .spinner { width: .8rem; height: .8rem; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .card > footer { margin-top: .75rem; padding-top: .5rem; border-top: 1px solid var(--line); display: flex; gap: .25rem; flex-wrap: wrap; justify-content: space-between; }
+
+    .log { margin-top: 1.5rem; }
+    .log-head { display: flex; justify-content: space-between; align-items: center; }
+    .log-head h2 { color: var(--muted); font-weight: 500; }
+    #log-box { margin-top: .5rem; height: 11rem; overflow-y: auto; border-radius: .5rem; background: var(--log-bg); color: var(--log-text); padding: .6rem .75rem; font: 12px/1.6 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    #log-box .err { color: var(--log-error); }
+    #log-box:empty::before { content: "Nothing yet. What you do here is reported in this box."; color: var(--muted); }
+    .help { margin-top: 1.25rem; color: var(--muted); font-size: .85rem; }
+    .help summary { cursor: pointer; }
+
+    dialog { width: min(32rem, 92vw); border: 1px solid var(--line); border-radius: .6rem; background: var(--panel); color: var(--text); padding: 1.25rem; }
+    dialog::backdrop { background: rgba(0, 0, 0, .55); }
+    dialog h2 { margin-bottom: .5rem; }
+    dialog p { font-size: .85rem; }
+    .body p + p { margin-top: .5rem; }
+    .field { display: block; margin-top: .75rem; font-size: .8rem; }
+    .field .control { display: flex; gap: .5rem; margin-top: .25rem; }
+    input[type=text], input[type=password], select { font: inherit; width: 100%; padding: .4rem .55rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--bg); color: var(--text); }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
+    .error { color: var(--danger); font-size: .8rem; min-height: 1.2em; margin-top: .5rem; }
+    .choices label, .box label { display: flex; gap: .5rem; align-items: flex-start; font-size: .85rem; margin-top: .4rem; }
+    .box { background: var(--soft); border-radius: .4rem; padding: .5rem .6rem; font-size: .8rem; margin-top: .75rem; }
+    .box p + p { margin-top: .25rem; }
+    .link { background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; cursor: pointer; font: inherit; }
+    .link:hover { color: var(--text); }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  </style>
 </head>
-<body class="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-  <main class="mx-auto max-w-3xl p-6">
-    <h1 class="text-lg font-semibold">Account Profiles</h1>
-    <p class="mt-1 text-sm text-zinc-500">
-      Two persistent Chromium profiles, no proxies. Log in once with "Login / Sync Session" (a visible
-      window on this machine), then click "Save Session". After that the profile stays signed in, so
-      there is nothing to reconnect and no MFA again until the site expires the session.
+<body>
+<main>
+  <header>
+    <h1>Claude accounts</h1>
+    <p class="lede">
+      Switch the Claude app and Claude Code between your accounts without signing in again.
+      Each login can be saved to your private Vault, so another Mac can load it.
     </p>
+  </header>
 
-    <section id="vault-panel" class="mt-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <h2 class="text-sm font-semibold">From the Vault</h2>
-      <p class="mt-1 text-xs text-zinc-500">
-        Pick an account that exists in the Vault, then load one part of it onto this Mac and switch to it:
-        Desktop quits and reopens the Claude app on it, CLI opens Terminal as it, Browser signs its profile in.
-        A new account gets its folders created (CLI config: ~/.claude for main, ~/.claude-&lt;name&gt; for the others).
-      </p>
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        <select id="vault-account" class="rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700"></select>
-        <div id="vault-buttons" class="flex flex-wrap gap-2"></div>
-      </div>
-      <p id="vault-saved" class="mt-2 text-xs text-zinc-500"></p>
-      <button type="button" id="restore-open" class="mt-3 text-xs text-zinc-500 underline hover:text-zinc-300">Restore from a backup file...</button>
-    </section>
+  <div class="topbar">
+    <div id="overview" class="strip"></div>
+    <span class="row">
+      <button type="button" id="account-open" class="btn btn-outline">Add an account…</button>
+      <button type="button" id="restore-open" class="btn btn-quiet">Restore from a backup file…</button>
+    </span>
+  </div>
 
-    <div id="cards" class="mt-6 grid gap-4 sm:grid-cols-2"></div>
+  <section id="setup" class="panel setup" hidden>
+    <h2>One-time setup: which account is the Claude app signed in as right now?</h2>
+    <p class="muted">Open the Claude app and look at its account, then pick it here. Nothing is moved or changed; from then on the dashboard can switch the app between accounts.</p>
+    <div id="setup-accounts" class="row"></div>
+  </section>
 
-    <h2 class="mt-8 text-sm font-medium text-zinc-500">Activity</h2>
-    <div id="log" class="mt-2 h-48 overflow-y-auto rounded-lg bg-black p-3 font-mono text-xs leading-5 text-zinc-300"></div>
-  </main>
+  <section id="vault-only" class="panel" hidden>
+    <h2>In the Vault, not on this Mac yet</h2>
+    <div id="vault-only-list"></div>
+  </section>
 
-<dialog id="backup-dialog" class="w-[min(30rem,92vw)] rounded-lg border border-zinc-300 bg-white p-5 text-zinc-900 backdrop:bg-black/60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100">
-  <form id="backup-form" class="space-y-3">
-    <h2 class="text-sm font-semibold">Back up <span id="backup-name"></span></h2>
-    <p class="text-xs text-zinc-500">
-      One encrypted file with the account's three logins and what cannot be re-downloaded: Claude Code history,
-      settings, skills and plugins, and the desktop app's data. <strong>Without the passphrase the file cannot be
-      opened, and there is no way to recover it.</strong> Store the file somewhere other than this Mac's disk.
-    </p>
-    <label class="block text-xs">Folder to save it in
-      <span class="mt-1 flex gap-2">
-        <input id="backup-folder" autocomplete="off" placeholder="~/Documents/Claude-backups"
-          class="w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
-        <button type="button" id="backup-browse" class="shrink-0 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800">Browse...</button>
-      </span>
-    </label>
-    <fieldset id="backup-existing" class="hidden space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60">
-      <legend class="sr-only">Existing backups</legend>
-      <p id="backup-existing-note" class="text-zinc-500"></p>
-      <label class="flex items-start gap-2"><input type="radio" name="backup-mode" value="new" checked class="mt-0.5" /><span>Add a new backup and keep the existing one(s)</span></label>
-      <label class="flex items-start gap-2"><input type="radio" name="backup-mode" value="replace" class="mt-0.5" /><span>Replace the existing one(s): the older files for this account are deleted once the new one is written and checked to open</span></label>
-    </fieldset>
-    <label class="block text-xs">Passphrase (at least 12 characters)
-      <input id="backup-pass" type="password" autocomplete="new-password"
-        class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
-    </label>
-    <label class="block text-xs">Repeat the passphrase
-      <input id="backup-pass2" type="password" autocomplete="new-password"
-        class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
-    </label>
-    <p id="backup-error" class="min-h-4 text-xs text-rose-500"></p>
-    <div class="flex justify-end gap-2">
-      <button type="button" id="backup-cancel" class="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800">Cancel</button>
-      <button type="submit" class="rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500">Back up</button>
+  <div id="cards" class="cards"></div>
+
+  <section class="log">
+    <div class="log-head">
+      <h2>Activity</h2>
+      <button type="button" id="log-clear" class="btn btn-quiet btn-sm">Clear</button>
+    </div>
+    <div id="log-box" aria-live="polite"></div>
+  </section>
+
+  <details class="help">
+    <summary>How this works</summary>
+    <ul>
+      <li><b>Claude app</b>: each account has its own app data on this Mac. Switching quits the app, swaps which data it uses, and reopens it. Nothing is copied or deleted.</li>
+      <li><b>Claude Code</b>: each account has its own Claude Code folder and login on this Mac. "Open in Terminal" starts Claude Code as that account.</li>
+      <li><b>Vault</b>: "Save to Vault" puts one login in your private Vault; "Load from Vault" brings it onto this Mac. Only the accounts listed in VAULT_ALLOWED_ACCOUNTS (in .env) may use the Vault.</li>
+      <li><b>Backup</b>: one encrypted file with the account's two logins and what cannot be re-downloaded (Claude Code history, settings, the app's data). Restoring only adds what is missing.</li>
+    </ul>
+  </details>
+</main>
+
+<dialog id="confirm-dialog">
+  <form method="dialog">
+    <h2 id="confirm-title"></h2>
+    <div id="confirm-body" class="body"></div>
+    <div class="dialog-actions">
+      <button type="submit" value="cancel" class="btn btn-outline">Cancel</button>
+      <button type="submit" value="ok" id="confirm-ok" class="btn btn-primary">OK</button>
     </div>
   </form>
 </dialog>
 
-<dialog id="restore-dialog" class="w-[min(32rem,92vw)] rounded-lg border border-zinc-300 bg-white p-5 text-zinc-900 backdrop:bg-black/60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100">
-  <form id="restore-form" class="space-y-3">
-    <h2 class="text-sm font-semibold">Restore from a backup</h2>
-    <p class="text-xs text-zinc-500">
+<dialog id="account-dialog">
+  <form id="account-form">
+    <h2 id="account-title">Add an account</h2>
+    <p class="muted" id="account-intro"></p>
+    <label class="field">Short name (letters, digits, - and _; it names the account's folders)
+      <span class="control"><input id="account-id" type="text" autocomplete="off" placeholder="work" /></span>
+    </label>
+    <label class="field">Label (what the card shows)
+      <span class="control"><input id="account-label" type="text" autocomplete="off" placeholder="Work account" /></span>
+    </label>
+    <p id="account-note" class="muted" style="font-size: .8rem; margin-top: .5rem;"></p>
+    <p id="account-error" class="error"></p>
+    <div class="dialog-actions">
+      <button type="button" id="account-cancel" class="btn btn-outline">Cancel</button>
+      <button type="submit" class="btn btn-primary">Add</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="backup-dialog">
+  <form id="backup-form">
+    <h2>Back up <span id="backup-name"></span></h2>
+    <p class="muted">
+      One encrypted file with the account's two logins and what cannot be re-downloaded: Claude Code history,
+      settings, skills and plugins, and the Claude app's data. <strong>Without the passphrase the file cannot be
+      opened, and there is no way to recover it.</strong> Store the file somewhere other than this Mac's disk.
+    </p>
+    <label class="field">Folder to save it in
+      <span class="control">
+        <input id="backup-folder" type="text" autocomplete="off" placeholder="~/Documents/Claude-backups" />
+        <button type="button" id="backup-browse" class="btn btn-outline">Browse…</button>
+      </span>
+    </label>
+    <fieldset id="backup-existing" class="box" hidden style="border: 0;">
+      <legend class="sr-only">Existing backups</legend>
+      <p id="backup-existing-note" class="muted"></p>
+      <label><input type="radio" name="backup-mode" value="new" checked /><span>Add a new backup and keep the existing one(s)</span></label>
+      <label><input type="radio" name="backup-mode" value="replace" /><span>Replace the existing one(s): the older files for this account are deleted once the new one is written and checked to open</span></label>
+    </fieldset>
+    <label class="field">Passphrase (at least 12 characters)
+      <span class="control"><input id="backup-pass" type="password" autocomplete="new-password" /></span>
+    </label>
+    <label class="field">Repeat the passphrase
+      <span class="control"><input id="backup-pass2" type="password" autocomplete="new-password" /></span>
+    </label>
+    <p id="backup-error" class="error"></p>
+    <div class="dialog-actions">
+      <button type="button" id="backup-cancel" class="btn btn-outline">Cancel</button>
+      <button type="submit" class="btn btn-primary">Back up</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="restore-dialog">
+  <form id="restore-form">
+    <h2>Restore from a backup</h2>
+    <p class="muted">
       Opens a backup file and puts back what you choose. It only adds what is missing:
       <strong>nothing that already exists is overwritten or deleted.</strong>
     </p>
-    <label class="block text-xs">Folder with the backups
-      <span class="mt-1 flex gap-2">
-        <input id="restore-folder" autocomplete="off" placeholder="~/Documents/Claude-backups"
-          class="w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
-        <button type="button" id="restore-browse-folder" class="shrink-0 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800">Browse...</button>
+    <label class="field">Folder with the backups
+      <span class="control">
+        <input id="restore-folder" type="text" autocomplete="off" placeholder="~/Documents/Claude-backups" />
+        <button type="button" id="restore-browse-folder" class="btn btn-outline">Browse…</button>
       </span>
     </label>
-    <p class="text-xs text-zinc-500">The newest backup in the folder is selected for you.
-      <button type="button" id="restore-browse-file" class="underline hover:text-zinc-300">Choose a specific file...</button></p>
-    <label class="block text-xs">Backup file
-      <select id="restore-file" class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700"></select>
+    <p class="muted" style="margin-top: .5rem; font-size: .8rem;">The newest backup in the folder is selected for you.
+      <button type="button" id="restore-browse-file" class="link">Choose a specific file…</button></p>
+    <label class="field">Backup file
+      <span class="control"><select id="restore-file"></select></span>
     </label>
-    <label class="block text-xs">Passphrase
-      <input id="restore-pass" type="password" autocomplete="off"
-        class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
+    <label class="field">Passphrase
+      <span class="control"><input id="restore-pass" type="password" autocomplete="off" /></span>
     </label>
-    <div id="restore-summary" class="hidden space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60"></div>
-    <div id="restore-choices" class="hidden space-y-2 text-sm"></div>
-    <p id="restore-error" class="min-h-4 text-xs text-rose-500"></p>
-    <div class="flex justify-end gap-2">
-      <button type="button" id="restore-cancel" class="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800">Cancel</button>
-      <button type="submit" id="restore-go" class="rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">Open backup</button>
+    <div id="restore-summary" class="box" hidden></div>
+    <div id="restore-choices" class="choices" hidden></div>
+    <p id="restore-error" class="error"></p>
+    <div class="dialog-actions">
+      <button type="button" id="restore-cancel" class="btn btn-outline">Cancel</button>
+      <button type="submit" id="restore-go" class="btn btn-primary">Open backup</button>
     </div>
   </form>
 </dialog>
@@ -114,368 +258,445 @@ const $ = (s) => document.querySelector(s);
 const h = (tag, cls = '', text) => {
   const el = document.createElement(tag);
   if (cls) el.className = cls;
-  if (text != null) el.textContent = text; // textContent only: page titles are untrusted
+  if (text != null) el.textContent = text; // textContent only: page titles and host names are untrusted
   return el;
 };
-
-const STATUS = {
-  not_logged_in: ['Not Logged In', 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'],
-  ready:         ['Ready / Idle', 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300'],
-  login_required: ['Login required', 'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300'],
-  busy:          ['Running task', 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300'],
-  login:         ['Login window open', 'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300'],
+const button = (text, cls, onClick, { disabled = false, title = '' } = {}) => {
+  const b = h('button', cls, text);
+  b.type = 'button';
+  b.disabled = disabled;
+  if (title) b.title = title;
+  b.addEventListener('click', onClick);
+  return b;
 };
-const BTN = 'rounded-md px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50';
-const OUTLINE = 'border border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800';
-
-let accounts = [];
-const inFlight = new Set();
-const vaultInfo = {}; // accountId -> what the Vault holds for that account, loaded on demand
-
-const when = (iso) => new Date(iso).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-
-async function loadVault(id) {
-  try {
-    const res = await fetch(`/api/accounts/${id}/vault`);
-    if (res.status === 404) throw new Error('stale server'); // the page is newer than the server
-    vaultInfo[id] = await res.json();
-  } catch (e) {
-    const note = e.message === 'stale server' ? 'restart the dashboard server (Ctrl+C, npm start)' : 'unavailable';
-    vaultInfo[id] = { desktop: { state: 'blocked', message: note }, browser: { state: 'blocked', message: note } };
-  }
-  render();
-}
-
-const SAVE_CONFIRM = {
-  desktop: (a) => `Save the desktop app login for "${a.label}" to the Vault?\n\nThis is the sessionKey cookie only. macOS will ask to allow Keychain access: click Allow.`,
-  browser: (a) => `Save the browser (claude.ai) session for "${a.label}" to the Vault?\n\nThis is the signed-in session of that browser profile.`,
-  cli: (a) => `Save the Claude Code (CLI) login for "${a.label}" to the Vault?\n\nThis is the login the CLI keeps in this Mac's Keychain. macOS may ask to allow Keychain access: click Allow.`,
-};
-
+const when = (d) => new Date(d).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
 // The Keychain's "20261104144455Z" style timestamp as a Date
 const keychainTime = (s) => {
   const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/.exec(s ?? '');
   return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6])) : null;
 };
 
-const LOAD_CONFIRM = {
-  desktop: (a) => `Load the desktop login for "${a.label}" from the Vault and switch the Claude app to it?\n\nThe Claude app will QUIT (ending any open session, including Claude Code sessions) and reopen on this account. The saved cookie is merged into that account's folder; nothing else there is touched. macOS will ask to allow Keychain access: click Allow.`,
-  browser: (a) => `Load the browser (claude.ai) session for "${a.label}" from the Vault?\n\nIt is merged into this account's browser profile: cookies with the same name are replaced, everything else stays.`,
-  cli: (a, vi) => {
-    const vault = vi?.cli?.vault && new Date(vi.cli.vault.pushedAt);
-    const local = keychainTime(vi?.cli?.local?.modified);
-    const warn = vault && local && local > vault
-      ? `\n\nWARNING: this Mac's login (${when(local)}) is NEWER than the Vault copy (${when(vault)}). Loading it may sign you out.`
-      : '';
-    return `Load the Claude Code (CLI) login for "${a.label}" from the Vault and open Terminal as it?\n\nThis REPLACES the login this Mac has now for that account.${warn}\n\nmacOS may ask to allow Keychain access: click Allow.`;
-  },
-};
+const PARTS = [['desktop', 'Claude app'], ['cli', 'Claude Code']];
+const PART_NAME = Object.fromEntries(PARTS);
+const KEYCHAIN = 'macOS will ask to allow Keychain access: click Allow (not "Always Allow").';
 
-// [text, dim?] for one part of the "Saved in the Vault" box
-function vaultText(part, describe) {
-  if (!part) return ['checking...', true];
-  if (part.state === 'blocked') return [/not allowed/.test(part.message) ? 'not enabled for this account yet' : part.message, true];
-  return part.vault ? [`${describe(part.vault)}, ${when(part.vault.pushedAt)}`, false] : ['nothing saved yet', true];
+// ------------------------------------------------------------------ server access
+
+let build = null;
+async function api(path, { method = 'GET', body } = {}) {
+  const init = { method };
+  if (body !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(body); // passphrases travel in the body, never in a URL
+  }
+  const res = await fetch(path, init);
+  const seen = res.headers.get('X-Dashboard-Build');
+  if (seen) {
+    // The server restarted (npm start reloads it on code changes): reload the page so both match.
+    if (build && seen !== build && !document.querySelector('dialog[open]')) location.reload();
+    build ??= seen;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(res.status === 404 && data.error === 'Not found'
+      ? 'this dashboard server is older than the page: restart it (npm start)'
+      : data.error || res.statusText);
+  }
+  return data;
 }
+const post = (path, body) => api(path, { method: 'POST', body });
 
 function log(text, error = false) {
-  const line = h('div', error ? 'text-rose-400' : '', `${new Date().toTimeString().slice(0, 8)}  ${text}`);
-  const box = $('#log');
-  box.append(line);
+  const box = $('#log-box');
+  box.append(h('div', error ? 'err' : '', `${new Date().toTimeString().slice(0, 8)}  ${text}`));
   box.scrollTop = box.scrollHeight;
 }
+$('#log-clear').addEventListener('click', () => $('#log-box').replaceChildren());
 
-async function call(id, action, label) {
-  inFlight.add(id);
-  render();
-  try {
-    const res = await fetch(`/api/accounts/${id}/${action}`, { method: 'POST' });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(
-        res.status === 404 && body.error === 'Not found'
-          ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
-          : body.error || res.statusText,
-      );
-    }
-    if (action === 'task' && body.challenged) {
-      log(`[${id}] Cloudflare is challenging the automated browser. This is a bot check, not a login failure, and it says nothing about whether this account is signed in.`, true);
-      log(`[${id}]   Signing in by hand in the login window can work (tick "verify you are human"); automated tasks may keep being challenged. The desktop app and the CLI are not affected.`);
-    } else if (action === 'task') {
-      const state = body.loggedIn === true ? 'signed in' : body.loggedIn === false ? 'LOGIN REQUIRED' : 'login state unknown';
-      log(`[${id}] ${state}: "${body.title}" (${body.cookies} cookies, ${body.url})`, body.loggedIn === false);
-    } else if (action === 'cli') {
-      log(`[${id}] Terminal opened with Claude Code (${body.command})`);
-    } else if (action.startsWith('vault/load')) {
-      log(`[${id}] Loaded from the Vault: ${body.message}`);
-      loadVault(id);
-      refreshDesktop();
-    } else if (action.startsWith('vault')) {
-      if (body.desktop) log(`[${id}] Vault, desktop app: ${body.desktop.message}`, !body.desktop.ok);
-      if (body.browser) log(`[${id}] Vault, browser session: ${body.browser.message}`, !body.browser.ok);
-      if (body.cli) log(`[${id}] Vault, Claude Code CLI: ${body.cli.message}`);
-      loadVault(id);
-    } else if (action === 'save') {
-      log(`[${id}] Session saved`);
-    } else {
-      log(`[${id}] ${label}`);
-    }
-  } catch (e) {
-    log(`[${id}] ${label} failed: ${e.message}`, true);
-  } finally {
-    inFlight.delete(id);
-    refresh();
+// ------------------------------------------------------------------- state
+
+const state = { accounts: [], desktop: null };
+const vaultInfo = {}; // id -> { desktop, cli } from the Vault helpers, or null while loading
+let vaultList = null; // { accounts } from the Vault listing, or { accounts: {}, error }
+const busy = {}; // id -> what is running for that account right now
+let lastKey = '';
+
+const labelOf = (id) => state.accounts.find((a) => a.id === id)?.label ?? id;
+
+// Re-render only when something changed, so buttons are not rebuilt under the pointer every poll.
+function render(force = false) {
+  const key = JSON.stringify([state, vaultInfo, vaultList, busy]);
+  if (!force && key === lastKey) return;
+  lastKey = key;
+  renderOverview();
+  renderVaultOnly();
+  $('#cards').replaceChildren(...state.accounts.map(card));
+}
+
+function renderOverview() {
+  const d = state.desktop;
+  const items = [];
+  if (d && !d.supported) items.push(['Claude app', 'only on macOS', 'muted']);
+  else if (d?.active) items.push(['Claude app', `on "${labelOf(d.active)}"${d.running ? ', running' : ', not running'}`, 'ok']);
+  else if (d) items.push(['Claude app', 'not set up yet', 'warn']);
+  if (vaultList?.error) items.push(['Vault', vaultList.error, 'warn']);
+  else if (vaultList) {
+    const n = Object.keys(vaultList.accounts).length;
+    items.push(['Vault', n ? `${n} account${n > 1 ? 's' : ''} saved` : 'empty so far', '']);
+  }
+  $('#overview').replaceChildren(...items.map(([k, v, cls]) => {
+    const s = h('span');
+    s.append(h('b', '', `${k}: `), h('span', cls, v));
+    return s;
+  }));
+
+  const setup = $('#setup');
+  setup.hidden = !(d?.supported && !d.active);
+  if (!setup.hidden) {
+    $('#setup-accounts').replaceChildren(...state.accounts.map((a) =>
+      button(a.label, 'btn btn-outline', () => initDesktop(a), { disabled: Boolean(busy[a.id]) })));
   }
 }
 
+function renderVaultOnly() {
+  const list = Object.entries(vaultList?.accounts ?? {}).filter(([, e]) => !e.local);
+  const sec = $('#vault-only');
+  sec.hidden = !list.length;
+  if (!list.length) return;
+  $('#vault-only-list').replaceChildren(...list.map(([id, e]) => {
+    const row = h('div', 'vault-only-row');
+    const saved = PARTS.filter(([p]) => e[p]).map(([, name]) => name).join(', ') || 'nothing';
+    row.append(h('span', 'name', id), h('span', 'muted', `saved: ${saved}`));
+    row.append(button('Add to this Mac', 'btn btn-outline btn-sm', () => openAccountDialog(id), { disabled: !e.allowed }));
+    if (!e.allowed) row.append(h('span', 'muted', 'not enabled on this Mac (VAULT_ALLOWED_ACCOUNTS in .env)'));
+    return row;
+  }));
+}
+
+// ------------------------------------------------------------------- one card per account
+
 function card(a) {
-  const [label, badge] = STATUS[a.status];
-  const el = h('article', 'rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900');
-  const head = h('div', 'flex items-start justify-between gap-2');
-  head.append(h('h2', 'text-sm font-semibold', a.label), h('span', `shrink-0 rounded px-2 py-0.5 text-[11px] font-bold ${badge}`, label));
-  el.append(head);
-
-  el.append(h('p', 'mt-3 font-mono text-xs text-zinc-500', `CLI config: ${a.cliConfigDir ?? 'default (~/.claude)'}`));
-  const dc = desktopControl(a);
-  if (dc?.note) el.append(h('p', `mt-1 text-xs ${dc.dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400'}`, dc.note));
-  if (a.challenged) {
-    el.append(h('p', 'mt-2 rounded-md bg-amber-100 p-2 text-xs text-amber-900 dark:bg-amber-900/30 dark:text-amber-200',
-      'Cloudflare is challenging the automated browser. This is a bot check, not a login failure. If the login window shows a "verify you are human" box, tick it. The desktop app and the CLI are not affected.'));
+  const el = h('article', 'panel card');
+  const head = h('header');
+  const title = h('div');
+  title.append(h('h2', '', a.label), h('div', 'id', `${a.id} · Claude Code folder ${a.cliConfigDir ?? '~/.claude'}`));
+  head.append(title);
+  if (state.desktop?.active === a.id) head.append(h('span', 'chip chip-ok', 'Claude app is here'));
+  el.append(head, desktopSurface(a), cliSurface(a));
+  if (busy[a.id]) {
+    const b = h('div', 'busy');
+    b.append(h('span', 'spinner'), h('span', '', busy[a.id]));
+    el.append(b);
   }
-  if (a.lastResult) {
-    el.append(h('p', 'mt-3 break-words text-xs text-zinc-500', `Last task: "${a.lastResult.title}" (${a.lastResult.cookies} cookies)`));
-  }
-
-  // What is in the Vault right now, per part.
-  const vi = vaultInfo[a.id];
-  const box = h('div', 'mt-3 space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60');
-  box.append(h('p', 'font-medium text-zinc-600 dark:text-zinc-300', 'Saved in the Vault'));
-  const line = (name, [text, dim]) => {
-    const r = h('div', 'flex justify-between gap-3');
-    r.append(h('span', 'shrink-0 text-zinc-500', name), h('span', `text-right ${dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400'}`, text));
-    box.append(r);
-  };
-  line('Desktop app', vaultText(vi?.desktop, () => 'login cookie'));
-  line('Browser (claude.ai)', vaultText(vi?.browser, (v) => `${v.cookies} cookies`));
-  line('Claude Code CLI', vaultText(vi?.cli, () => 'CLI login'));
-
-  // Saving is a choice: one small button per part. (Loading is in the "From the Vault" panel.)
-  const saveRow = h('div', 'flex flex-wrap items-center gap-1 border-t border-zinc-200 pt-2 dark:border-zinc-700');
-  saveRow.append(h('span', 'mr-1 text-zinc-500', 'Save to Vault:'));
-  const locked = inFlight.has(a.id) || a.status === 'busy' || a.status === 'login';
-  for (const [part, text] of [['desktop', 'Desktop'], ['browser', 'Browser'], ['cli', 'CLI']]) {
-    const b = h('button', 'rounded border border-zinc-300 px-2 py-1 text-[11px] font-medium hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:hover:bg-zinc-700', text);
-    b.disabled = locked;
-    b.addEventListener('click', () => {
-      if (confirm(SAVE_CONFIRM[part](a))) call(a.id, `vault?parts=${part}`, 'Saved to Vault');
-    });
-    saveRow.append(b);
-  }
-  box.append(saveRow);
-  el.append(box);
-
-  const actions = h('div', 'mt-4 flex flex-wrap gap-2');
-  const btn = (text, cls, action, label, disabled = false, confirmText = '') => {
-    const b = h('button', `${BTN} ${cls}`, text);
-    b.disabled = disabled || inFlight.has(a.id);
-    b.addEventListener('click', () => {
-      if (confirmText && !confirm(confirmText)) return;
-      call(a.id, action, label);
-    });
-    actions.append(b);
-  };
-
-  if (a.status === 'login') {
-    btn('Save Session', 'bg-emerald-600 text-white hover:bg-emerald-500', 'save', 'Saving session');
-  } else {
-    btn('Login / Sync Session', 'bg-violet-600 text-white hover:bg-violet-500', 'login', 'Login window opened', a.status === 'busy');
-    btn('Open Claude Code', 'bg-zinc-800 text-white hover:bg-zinc-700 dark:bg-zinc-200 dark:text-zinc-900 dark:hover:bg-zinc-300', 'cli', 'Terminal opened');
-    if (dc?.button) {
-      const sw = h('button', `${BTN} border border-violet-400 text-violet-700 hover:bg-violet-50 dark:border-violet-500 dark:text-violet-300 dark:hover:bg-violet-950`, 'Switch Claude app to this');
-      sw.disabled = desktopBusy || desktop.switching || inFlight.has(a.id);
-      sw.addEventListener('click', () => switchDesktop(a));
-      actions.append(sw);
-    }
-    btn('Run test task', 'text-xs text-zinc-500 hover:text-zinc-300', 'task', 'Task', !['ready', 'login_required'].includes(a.status));
-    const backupBtn = h('button', `${BTN} text-xs text-zinc-500 hover:text-zinc-300`, 'Back up...');
-    backupBtn.disabled = inFlight.has(a.id) || a.status === 'busy';
-    backupBtn.addEventListener('click', () => openBackup(a));
-    actions.append(backupBtn);
-    btn(
-      'Reset profile',
-      'text-xs text-zinc-500 hover:text-rose-500',
-      'reset',
-      'Profile reset',
-      a.status === 'busy',
-      `Delete the saved profile and backup for "${a.label}"? You will need to log in again.`,
-    );
-  }
-  el.append(actions);
+  const foot = h('footer');
+  foot.append(button('Back up this account…', 'btn btn-quiet', () => openBackup(a), { disabled: Boolean(busy[a.id]) }));
+  el.append(foot);
   return el;
 }
 
-function render() {
-  $('#cards').replaceChildren(...accounts.map(card));
+// One row: what the surface is, its state, its actions, and the Vault line under it.
+function surface(name, stateText, cls, actions, extra = []) {
+  const s = h('section', 'surface');
+  const row = h('div', 'surface-row');
+  const head = h('div', 'surface-head');
+  head.append(h('div', 'surface-name', name), h('div', `surface-state ${cls}`, stateText));
+  const right = h('div', 'surface-actions');
+  right.append(...actions);
+  row.append(head, right);
+  s.append(row, ...extra);
+  return s;
 }
+
+function vaultLine(a, part) {
+  const vi = vaultInfo[a.id];
+  const p = vi?.[part];
+  let text = 'Vault: checking…';
+  let canSave = Boolean(vi);
+  let canLoad = false;
+  if (p?.state === 'blocked') {
+    text = /not allowed/.test(p.message) ? 'Vault: not enabled for this account (VAULT_ALLOWED_ACCOUNTS in .env)' : `Vault: ${p.message}`;
+    canSave = false;
+  } else if (p?.vault) {
+    text = `Vault: saved ${when(p.vault.pushedAt)}${p.vault.host ? ` on ${p.vault.host}` : ''}`;
+    canLoad = true;
+  } else if (p) {
+    text = 'Vault: nothing saved yet';
+  }
+  const locked = Boolean(busy[a.id]);
+  const line = h('div', 'surface-vault');
+  line.append(
+    h('span', '', text),
+    button('Save to Vault', 'btn btn-quiet btn-sm', () => saveToVault(a, part), { disabled: locked || !canSave }),
+    button('Load from Vault', 'btn btn-quiet btn-sm', () => loadFromVault(a, part), {
+      disabled: locked || !canLoad,
+      title: canLoad ? '' : 'Nothing saved in the Vault for this part yet',
+    }),
+  );
+  return line;
+}
+
+function desktopSurface(a) {
+  const d = state.desktop;
+  const actions = [];
+  let text = 'only on macOS';
+  let cls = 'muted';
+  const locked = Boolean(busy[a.id]) || Boolean(d?.switching);
+  if (d?.supported) {
+    if (!d.active) {
+      text = 'not set up yet (see the top of the page)';
+    } else if (d.active === a.id) {
+      text = d.running ? 'open on this account now' : 'opens on this account next time';
+      cls = 'ok';
+    } else if (d.parked.includes(a.id)) {
+      text = 'ready: its app data is on this Mac';
+      cls = '';
+      actions.push(button('Switch the app to this', 'btn btn-primary', () => switchDesktop(a), { disabled: locked }));
+    } else {
+      text = 'no app data on this Mac yet';
+      actions.push(button('Sign in via the app…', 'btn btn-outline', () => newDesktop(a), {
+        disabled: locked,
+        title: 'Reopens the Claude app signed out, so you can sign in as this account',
+      }));
+    }
+  }
+  return surface('Claude app', text, cls, actions, [vaultLine(a, 'desktop')]);
+}
+
+function cliSurface(a) {
+  const c = vaultInfo[a.id]?.cli;
+  let text = 'checking…';
+  let cls = 'muted';
+  if (c?.local?.present === true) {
+    const t = keychainTime(c.local.modified);
+    text = `login on this Mac${t ? `, last changed ${when(t)}` : ''}`;
+    cls = 'ok';
+  } else if (c?.local?.present === false) {
+    text = 'no login on this Mac yet: Terminal will offer /login';
+  } else if (c) {
+    text = 'Terminal asks you to sign in (/login) if needed';
+  }
+  const actions = [button('Open in Terminal', 'btn btn-outline', () => openCli(a), { disabled: Boolean(busy[a.id]) })];
+  return surface('Claude Code (CLI)', text, cls, actions, [vaultLine(a, 'cli')]);
+}
+
+// ------------------------------------------------------------------- actions
+
+// A styled confirmation. Lines starting with "!" are warnings. Resolves to true when confirmed.
+function ask({ title, lines = [], ok = 'OK', danger = false }) {
+  const d = $('#confirm-dialog');
+  $('#confirm-title').textContent = title;
+  $('#confirm-body').replaceChildren(...lines.map((l) => h('p', l.startsWith('!') ? 'warn' : '', l.replace(/^!/, ''))));
+  const b = $('#confirm-ok');
+  b.textContent = ok;
+  b.className = `btn ${danger ? 'btn-danger-solid' : 'btn-primary'}`;
+  d.returnValue = '';
+  d.showModal();
+  b.focus();
+  return new Promise((resolve) => d.addEventListener('close', () => resolve(d.returnValue === 'ok'), { once: true }));
+}
+
+// Runs one operation for an account: the card shows what is happening, the log gets the outcome.
+// done(result) may return a line to log, or [line, true] for a failure line.
+async function act(a, doing, fn, done) {
+  busy[a.id] = doing;
+  render();
+  log(`[${a.id}] ${doing}`);
+  try {
+    const r = await fn();
+    const msg = typeof done === 'function' ? done(r) : done;
+    if (Array.isArray(msg)) log(`[${a.id}] ${msg[0]}`, msg[1]);
+    else if (msg) log(`[${a.id}] ${msg}`);
+    return r;
+  } catch (e) {
+    log(`[${a.id}] Failed: ${e.message}`, true);
+    return null;
+  } finally {
+    delete busy[a.id];
+    await refresh();
+  }
+}
+
+const SAVE_LINES = {
+  desktop: (a) => [`This saves the Claude app's login cookie for "${a.label}" (nothing else from the app).`, KEYCHAIN],
+  cli: (a) => [`This saves the Claude Code login this Mac keeps for "${a.label}".`, KEYCHAIN],
+};
+
+async function saveToVault(a, part, force = false) {
+  if (!force && !(await ask({ title: `Save the ${PART_NAME[part]} login to the Vault?`, lines: SAVE_LINES[part](a), ok: 'Save' }))) return;
+  const r = await act(
+    a,
+    `Saving the ${PART_NAME[part]} login to the Vault… Click Allow if macOS asks.`,
+    () => post(`/api/accounts/${a.id}/vault?parts=${part}${force ? '&force=1' : ''}`),
+    (r) => (r[part].ok ? r[part].message : [`Not saved: ${r[part].message}`, true]),
+  );
+  loadVault(a.id);
+  loadVaultAccounts();
+  const o = r?.[part];
+  if (o && !o.ok && /--force/.test(o.message)) {
+    const yes = await ask({
+      title: 'The Vault has a different copy',
+      lines: [o.message.replace(/\s*Pull first, or use --force\.?$/, '.'), '!Replace the Vault copy with the login on this Mac? The copy in the Vault is lost.'],
+      ok: 'Replace the Vault copy',
+      danger: true,
+    });
+    if (yes) await saveToVault(a, part, true);
+  }
+}
+
+function loadLines(a, part) {
+  const d = state.desktop;
+  if (part === 'desktop') {
+    return [
+      d?.running
+        ? '!The Claude app will quit (ending whatever is open in it, Claude Code sessions included) and reopen on this account.'
+        : 'The Claude app is not running; it will open on this account next time.',
+      'The saved cookie is merged into this account\'s app data; nothing else there is touched.',
+      KEYCHAIN,
+    ];
+  }
+  const vault = vaultInfo[a.id]?.cli?.vault;
+  const local = keychainTime(vaultInfo[a.id]?.cli?.local?.modified);
+  const lines = ['!This replaces the Claude Code login this Mac has for the account, then opens Terminal as it.'];
+  if (vault && local && local > new Date(vault.pushedAt)) {
+    lines.push(`!This Mac's login (${when(local)}) is newer than the Vault copy (${when(vault.pushedAt)}). Loading the older one may sign you out.`);
+  }
+  lines.push(KEYCHAIN);
+  return lines;
+}
+
+async function loadFromVault(a, part) {
+  const ok = part === 'desktop' ? (state.desktop?.running ? 'Quit the app and load' : 'Load') : 'Replace and open Terminal';
+  if (!(await ask({ title: `Load the ${PART_NAME[part]} login from the Vault?`, lines: loadLines(a, part), ok, danger: true }))) return;
+  await act(
+    a,
+    `Loading the ${PART_NAME[part]} login from the Vault… Click Allow if macOS asks.`,
+    () => post(`/api/accounts/${a.id}/vault/load?part=${part}`),
+    (r) => r.message,
+  );
+  loadVault(a.id);
+  loadVaultAccounts();
+}
+
+async function switchDesktop(a) {
+  const running = state.desktop?.running;
+  const lines = [running
+    ? '!The Claude app will quit (ending whatever is open in it, Claude Code sessions included) and reopen on this account.'
+    : 'The Claude app is not running, so this only changes which account it opens next.'];
+  if (!(await ask({ title: `Switch the Claude app to "${a.label}"?`, lines, ok: running ? 'Quit and switch' : 'Switch' }))) return;
+  await act(a, 'Switching the Claude app…', () => post(`/api/desktop/switch/${encodeURIComponent(a.id)}`), (r) =>
+    (r.note === 'already active' ? 'The Claude app was already on this account' : `The Claude app is now on this account${r.relaunched ? ' and has been reopened' : ''}`));
+}
+
+async function newDesktop(a) {
+  const d = state.desktop;
+  const lines = [
+    d.running ? '!The Claude app will quit (ending whatever is open in it).' : '',
+    `Its current data stays safe as "${labelOf(d.active)}". The app then opens signed out: sign in as "${a.label}" there. From then on you can switch between the accounts.`,
+  ].filter(Boolean);
+  if (!(await ask({ title: `Sign in to the Claude app as "${a.label}"?`, lines, ok: d.running ? 'Quit and reopen signed out' : 'Open the app signed out' }))) return;
+  await act(a, 'Preparing the Claude app for a new sign-in…', () => post(`/api/desktop/new/${encodeURIComponent(a.id)}`),
+    () => `The Claude app is open and signed out: sign in as "${a.label}" in it.`);
+}
+
+async function initDesktop(a) {
+  if (!(await ask({
+    title: `Is the Claude app signed in as "${a.label}" right now?`,
+    lines: ['This records that the app\'s current data belongs to that account. Nothing is moved or changed, so pick the account the app really shows.'],
+    ok: 'Yes, it is',
+  }))) return;
+  await act(a, 'Recording the Claude app\'s account…', () => post(`/api/desktop/init/${encodeURIComponent(a.id)}`), () => 'Done: the Claude app is tracked as this account');
+}
+
+async function openCli(a) {
+  await act(a, 'Opening Terminal…', () => post(`/api/accounts/${a.id}/cli`), (r) => `Terminal opened with Claude Code (${r.command})`);
+}
+
+// ------------------------------------------------------------------- add an account
+
+// One dialog for both cases: a brand-new account (nothing signed in anywhere yet), or an account
+// that exists in the Vault and gets a card here so its logins can be loaded.
+const accountDialog = $('#account-dialog');
+let accountFromVault = null; // the Vault account being added, or null for a new one
+
+function openAccountDialog(vaultId = null) {
+  accountFromVault = vaultId;
+  $('#account-title').textContent = vaultId ? `Add "${vaultId}" to this Mac` : 'Add an account';
+  $('#account-intro').textContent = vaultId
+    ? 'The account gets a card here. Then use its "Load from Vault" buttons to bring the saved logins onto this Mac.'
+    : 'The account gets a card here. Nothing is signed in yet: on its card, use "Sign in via the app…" for the Claude app and "Open in Terminal" for Claude Code (it asks you to sign in).';
+  $('#account-id').value = vaultId ?? '';
+  $('#account-id').readOnly = Boolean(vaultId);
+  $('#account-label').value = vaultId ?? '';
+  $('#account-note').textContent = vaultId
+    ? ''
+    : 'Its Claude Code folder will be ~/.claude-<short name>. To save or load its logins with the Vault, add the short name to VAULT_ALLOWED_ACCOUNTS in .env.';
+  $('#account-error').textContent = '';
+  accountDialog.showModal();
+  (vaultId ? $('#account-label') : $('#account-id')).focus();
+}
+
+$('#account-open').addEventListener('click', () => openAccountDialog());
+$('#account-cancel').addEventListener('click', () => accountDialog.close());
+$('#account-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = $('#account-id').value.trim();
+  const label = $('#account-label').value.trim();
+  const error = $('#account-error');
+  if (!/^[\w-]{1,40}$/.test(id)) return void (error.textContent = 'The short name may only use letters, digits, - and _.');
+  if (!accountFromVault && state.accounts.some((a) => a.id === id)) return void (error.textContent = `"${id}" already exists on this Mac.`);
+  try {
+    if (accountFromVault) await post(`/api/vault/add?account=${encodeURIComponent(id)}`, { label });
+    else await post('/api/accounts', { id, label });
+    accountDialog.close();
+    log(`[${id}] Added to this Mac. ${accountFromVault ? 'Use its "Load from Vault" buttons to bring the logins over.' : 'Sign in on each row of its card.'}`);
+    await refresh();
+    loadVaultAccounts();
+  } catch (err) {
+    error.textContent = err.message;
+  }
+});
+
+// ------------------------------------------------------------------- polling
 
 async function refresh() {
   try {
-    accounts = await (await fetch('/api/accounts')).json();
-    for (const a of accounts) {
+    const s = await api('/api/state');
+    state.accounts = s.accounts;
+    state.desktop = s.desktop;
+    for (const a of s.accounts) {
       if (!(a.id in vaultInfo)) {
         vaultInfo[a.id] = null; // placeholder so it loads once, not on every poll
         loadVault(a.id);
       }
     }
     render();
-  } catch {
-    /* server restarting: next poll retries */
-  }
-}
-
-// --------------------------------------------- Claude desktop app, one control per account
-
-let desktop = null; // { supported, active, parked, running, switching } from /api/desktop
-let desktopBusy = false;
-
-// What a card says and offers about the Claude app: it is on this account, it can be switched to it,
-// or there is nothing to switch to yet.
-function desktopControl(a) {
-  if (!desktop?.supported) return null;
-  if (!desktop.active) return { note: 'Claude app: not set up yet (run ./scripts/desktop-swap.sh init <account signed in>)', dim: true };
-  if (a.id === desktop.active) return { note: `Claude app: opens on this account${desktop.running ? ' (running now)' : ''}` };
-  if (!desktop.parked.includes(a.id)) return { note: 'Claude app: no folder for this account yet (Load > Desktop from the Vault)', dim: true };
-  return { button: true };
-}
-
-async function switchDesktop(a) {
-  const warning = desktop.running
-    ? 'The Claude app will QUIT (this ends any session open in it, including Claude Code sessions) and then reopen on this account.'
-    : 'The Claude app is not running, so this only changes which account it opens next.';
-  if (!confirm(`Switch the Claude desktop app to "${a.label}"?\n\n${warning}`)) return;
-
-  desktopBusy = true;
-  render();
-  log(`[${a.id}] Switching the Claude app to this account...`);
-  try {
-    const res = await fetch(`/api/desktop/switch/${encodeURIComponent(a.id)}`, { method: 'POST' });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
-    log(`[${a.id}] The Claude app is now on this account${body.relaunched ? ' (reopened)' : ''}`);
   } catch (e) {
-    log(`[${a.id}] Switching the Claude app failed: ${e.message}`, true);
-  } finally {
-    desktopBusy = false;
-    await refreshDesktop();
-    render();
+    // An old server (started before this page existed) has no /api/state: say so instead of showing nothing.
+    if (/not found|older than/i.test(e.message)) {
+      $('#overview').replaceChildren(h('span', 'warn', 'This dashboard server is older than the page. Restart it from Terminal.app: Ctrl+C, then npm start.'));
+    }
+    /* otherwise the server is restarting: the next poll retries */
   }
 }
 
-async function refreshDesktop() {
+async function loadVault(id) {
   try {
-    const next = await (await fetch('/api/desktop')).json();
-    const changed = JSON.stringify(next) !== JSON.stringify(desktop);
-    desktop = next;
-    if (changed) render(); // the cards show which account the Claude app is on
-  } catch {
-    /* server restarting: next poll retries */
+    vaultInfo[id] = await api(`/api/accounts/${id}/vault`);
+  } catch (e) {
+    const blocked = { state: 'blocked', message: e.message };
+    vaultInfo[id] = { desktop: blocked, cli: blocked };
   }
-}
-
-// ----------------------------------------------------------- "From the Vault" panel
-
-let vaultAccounts = {}; // name -> { desktop, browser, cli, allowed, local } from the Vault listing
-let vaultPanelBusy = false;
-let vaultPanelKey = '';
-const PARTS = [['desktop', 'Desktop'], ['browser', 'Browser'], ['cli', 'CLI']];
-
-// The buttons depend on which account is picked, so they are rebuilt on their own when it changes.
-function renderVaultButtons() {
-  const name = $('#vault-account').value;
-  const entry = vaultAccounts[name];
-  const box = $('#vault-buttons');
-  box.replaceChildren();
-  if (!entry) return;
-  for (const [part, text] of PARTS) {
-    const info = entry[part];
-    const b = h('button', `${BTN} bg-violet-600 text-white hover:bg-violet-500`, text);
-    b.disabled = vaultPanelBusy || !info || !entry.allowed;
-    b.title = info ? `Saved ${when(info.pushedAt)}` : 'Nothing saved for this part';
-    b.addEventListener('click', () => loadFromVault(name, part));
-    box.append(b);
-  }
-  $('#vault-saved').textContent = entry.allowed
-    ? PARTS.map(([p, text]) => `${text}: ${entry[p] ? when(entry[p].pushedAt) : 'not saved'}`).join('   |   ')
-    : 'This account is not enabled on this machine (VAULT_ALLOWED_ACCOUNTS).';
-}
-
-function renderVaultPanel() {
-  const select = $('#vault-account');
-  const names = Object.keys(vaultAccounts).sort();
-  const keep = names.includes(select.value) ? select.value : names[0];
-  select.replaceChildren(...names.map((n) => {
-    const o = h('option', 'text-black', vaultAccounts[n].local ? n : `${n} (new on this Mac)`);
-    o.value = n;
-    return o;
-  }));
-  if (keep) select.value = keep;
-  select.disabled = !names.length;
-  if (!names.length) $('#vault-saved').textContent = 'Nothing in the Vault yet. Use "Save to Vault" on an account below.';
-  renderVaultButtons();
+  render();
 }
 
 async function loadVaultAccounts() {
   try {
-    const res = await fetch('/api/vault/accounts');
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      vaultAccounts = {};
-      $('#vault-saved').textContent = res.status === 404 && body.error === 'Not found'
-        ? 'This dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
-        : `Could not read the Vault: ${body.error || res.statusText}`;
-      return renderVaultPanel();
-    }
-    vaultAccounts = body.accounts;
-    // Re-render only on a change, so an open dropdown is not reset by the periodic refresh.
-    const key = JSON.stringify([vaultAccounts, vaultPanelBusy]);
-    if (key === vaultPanelKey) return;
-    vaultPanelKey = key;
-    renderVaultPanel();
-  } catch {
-    /* server restarting: the next poll retries */
-  }
-}
-
-async function loadFromVault(name, part) {
-  const label = accounts.find((a) => a.id === name)?.label ?? name;
-  const vi = vaultInfo[name] ?? { cli: { vault: vaultAccounts[name]?.cli ?? null } };
-  if (!confirm(LOAD_CONFIRM[part]({ label }, vi))) return;
-
-  vaultPanelBusy = true;
-  renderVaultButtons();
-  log(`[${name}] Loading the ${part} part from the Vault...`);
-  try {
-    const res = await fetch(`/api/vault/load?account=${encodeURIComponent(name)}&part=${part}`, { method: 'POST' });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(res.status === 404 && body.error === 'Not found'
-        ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
-        : body.error || res.statusText);
-    }
-    log(`[${name}] Loaded from the Vault: ${body.message}`);
+    vaultList = await api('/api/vault/accounts');
   } catch (e) {
-    log(`[${name}] Load failed: ${e.message}`, true);
-  } finally {
-    vaultPanelBusy = false;
-    await refresh();
-    loadVault(name);
-    refreshDesktop();
-    vaultPanelKey = '';
-    loadVaultAccounts();
+    vaultList = { accounts: {}, error: e.message };
   }
+  render();
 }
-
-$('#vault-account').addEventListener('change', renderVaultButtons);
 
 // ------------------------------------------------------------- full backup dialog
 
@@ -484,30 +705,22 @@ let backupFor = null;
 
 // The native macOS chooser (the server runs on this Mac): resolves to a path, or null if cancelled.
 async function browse(kind) {
-  const res = await fetch(`/api/pick?kind=${kind}`, { method: 'POST' });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(res.status === 404 && body.error === 'Not found'
-      ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
-      : body.error || res.statusText);
-  }
-  return body.canceled ? null : body.path;
+  const r = await post(`/api/pick?kind=${kind}`);
+  return r.canceled ? null : r.path;
 }
 
 // When this account already has backups in the chosen folder, offer: add a new one, or replace.
 async function refreshBackupExisting() {
   const box = $('#backup-existing');
-  box.classList.add('hidden');
+  box.hidden = true;
   const folder = $('#backup-folder').value.trim();
   if (!folder || !backupFor) return;
   try {
-    const res = await fetch(`/api/backups?folder=${encodeURIComponent(folder)}&account=${encodeURIComponent(backupFor.id)}`);
-    if (!res.ok) return;
-    const { files } = await res.json();
+    const { files } = await api(`/api/backups?folder=${encodeURIComponent(folder)}&account=${encodeURIComponent(backupFor.id)}`);
     if (!files.length) return;
     $('#backup-existing-note').textContent = `This folder already has ${files.length} backup${files.length > 1 ? 's' : ''} of this account (newest: ${when(files[0].modified)}).`;
     document.querySelector('input[name="backup-mode"][value="new"]').checked = true; // the safe choice
-    box.classList.remove('hidden');
+    box.hidden = false;
   } catch {
     /* no hint: the backup itself still works */
   }
@@ -553,8 +766,7 @@ $('#backup-form').addEventListener('submit', async (e) => {
   if (pass !== $('#backup-pass2').value) return void (error.textContent = 'The two passphrases are not the same.');
 
   const a = backupFor;
-  const replace = !$('#backup-existing').classList.contains('hidden')
-    && document.querySelector('input[name="backup-mode"]:checked')?.value === 'replace';
+  const replace = !$('#backup-existing').hidden && document.querySelector('input[name="backup-mode"]:checked')?.value === 'replace';
   try {
     localStorage.setItem('backupFolder', folder);
   } catch {
@@ -563,32 +775,15 @@ $('#backup-form').addEventListener('submit', async (e) => {
   backupDialog.close();
   $('#backup-pass').value = '';
   $('#backup-pass2').value = '';
-  inFlight.add(a.id);
-  render();
-  log(`[${a.id}] Backing up (macOS may ask to allow Keychain access: click Allow). This can take a minute...`);
-  try {
-    const res = await fetch(`/api/accounts/${a.id}/backup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folder, passphrase: pass, replace }), // in the body, never in the URL
+  await act(a, 'Backing up… This can take a minute. Click Allow if macOS asks for Keychain access.',
+    () => post(`/api/accounts/${a.id}/backup`, { folder, passphrase: pass, replace }),
+    (body) => {
+      if (body.replaced?.length) log(`[${a.id}]   replaced ${body.replaced.length} older backup(s): ${body.replaced.join(', ')}`);
+      for (const [part, s] of Object.entries(body.logins)) log(`[${a.id}]   ${part} login: ${s}`, s !== 'saved');
+      for (const note of body.notes ?? []) log(`[${a.id}]   note: ${note}`, true);
+      log(`[${a.id}] Keep the passphrase safe: without it the file cannot be opened.`);
+      return `Backup saved: ${body.file} (${(body.bytes / 1048576).toFixed(1)} MB)`;
     });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(res.status === 404 && body.error === 'Not found'
-        ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
-        : body.error || res.statusText);
-    }
-    log(`[${a.id}] Backup saved: ${body.file} (${(body.bytes / 1048576).toFixed(1)} MB)`);
-    if (body.replaced?.length) log(`[${a.id}]   replaced ${body.replaced.length} older backup(s): ${body.replaced.join(', ')}`);
-    for (const [part, state] of Object.entries(body.logins)) log(`[${a.id}]   ${part} login: ${state}`, state !== 'saved');
-    for (const note of body.notes ?? []) log(`[${a.id}]   note: ${note}`, true);
-    log(`[${a.id}] Keep the passphrase safe: without it the file cannot be opened.`);
-  } catch (err) {
-    log(`[${a.id}] Backup failed: ${err.message}`, true);
-  } finally {
-    inFlight.delete(a.id);
-    refresh();
-  }
 });
 
 // ------------------------------------------------------ restore from a backup file
@@ -596,26 +791,15 @@ $('#backup-form').addEventListener('submit', async (e) => {
 const restoreDialog = $('#restore-dialog');
 let restoreStage = 'open'; // 'open': read the file, 'apply': tick what to restore
 
-async function postJson(url, body) {
-  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(res.status === 404 && data.error === 'Not found'
-      ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
-      : data.error || res.statusText);
-  }
-  return data;
-}
-
 function resetRestore() {
   restoreStage = 'open';
-  $('#restore-summary').classList.add('hidden');
-  $('#restore-choices').classList.add('hidden');
+  $('#restore-summary').hidden = true;
+  $('#restore-choices').hidden = true;
   $('#restore-go').textContent = 'Open backup';
 }
 
 // Lists the backups in the folder, newest first, and selects the newest. "want" selects a file the
-// user picked by hand (even one that does not follow the usual file name).
+// person picked by hand (even one that does not follow the usual file name).
 async function loadBackupList(want = null) {
   const folder = $('#restore-folder').value.trim();
   const select = $('#restore-file');
@@ -624,19 +808,17 @@ async function loadBackupList(want = null) {
   $('#restore-error').textContent = '';
   if (!folder) return;
   try {
-    const res = await fetch(`/api/backups?folder=${encodeURIComponent(folder)}`);
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
+    const body = await api(`/api/backups?folder=${encodeURIComponent(folder)}`);
     if (!body.files.length && !want) return void ($('#restore-error').textContent = 'No backup files (claude-backup-*.csbk) in that folder.');
     body.files.forEach((f, i) => {
-      const o = h('option', 'text-black', `${i === 0 ? '(newest) ' : ''}${f.name}  (${(f.bytes / 1048576).toFixed(1)} MB)`);
+      const o = h('option', '', `${i === 0 ? '(newest) ' : ''}${f.name}  (${(f.bytes / 1048576).toFixed(1)} MB)`);
       o.value = f.path;
       select.append(o);
     });
     if (want) {
       let o = [...select.options].find((x) => x.value === want);
       if (!o) {
-        o = h('option', 'text-black', want.split('/').pop());
+        o = h('option', '', want.split('/').pop());
         o.value = want;
         select.append(o);
       }
@@ -651,21 +833,21 @@ async function loadBackupList(want = null) {
 function showRestoreChoices(info) {
   const summary = $('#restore-summary');
   summary.replaceChildren(
-    h('p', 'font-medium', `Account "${info.account}", made ${when(info.createdAt)} on ${info.host}`),
-    ...Object.entries(info.logins ?? {}).map(([part, state]) => {
-      const line = h('p', state === 'saved' ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-500', `${part} login: ${state.length > 110 ? `${state.slice(0, 107)}...` : state}`);
-      line.title = state; // the full reason on hover
+    h('p', '', `Account "${info.account}", made ${when(info.createdAt)} on ${info.host}`),
+    ...Object.entries(info.logins ?? {}).map(([part, s]) => {
+      const line = h('p', s === 'saved' ? 'ok' : 'muted', `${part} login: ${s.length > 110 ? `${s.slice(0, 107)}...` : s}`);
+      line.title = s; // the full reason on hover
       return line;
     }),
-    ...(info.notes ?? []).map((n) => h('p', 'text-amber-600 dark:text-amber-400', `note: ${n}`)),
+    ...(info.notes ?? []).map((n) => h('p', 'warn', `note: ${n}`)),
   );
-  summary.classList.remove('hidden');
+  summary.hidden = false;
 
   const choices = $('#restore-choices');
   choices.replaceChildren();
   const cfg = info.account === 'main' ? '~/.claude' : `~/.claude-${info.account}`;
   const option = (value, label, available) => {
-    const row = h('label', `flex items-start gap-2 ${available ? '' : 'opacity-50'}`);
+    const row = h('label', available ? '' : 'muted');
     const box = h('input');
     box.type = 'checkbox';
     box.value = value;
@@ -676,14 +858,15 @@ function showRestoreChoices(info) {
   };
   option('vault', `Logins into the Vault (${info.vault.join(', ') || 'none in this backup'})`, info.vault.length > 0);
   option('config', `Claude Code history, settings, skills and plugins into ${cfg}`, info.hasConfig);
-  option('desktop', `Desktop app data into the "${info.account}" desktop folder (its login comes back through the Vault: use Load > Desktop)`, info.hasDesktop);
-  const replace = h('label', 'ml-6 flex items-center gap-2 text-xs text-zinc-500');
+  option('desktop', `Claude app data into the "${info.account}" app data folder (its login comes back through the Vault: use Load from Vault)`, info.hasDesktop);
+  const replace = h('label', 'muted');
+  replace.style.marginLeft = '1.5rem';
   const rbox = h('input');
   rbox.type = 'checkbox';
   rbox.id = 'restore-replace-vault';
   replace.append(rbox, h('span', '', 'Replace logins that already exist in the Vault'));
   choices.append(replace);
-  choices.classList.remove('hidden');
+  choices.hidden = false;
 }
 
 $('#restore-open').addEventListener('click', async () => {
@@ -726,9 +909,11 @@ $('#restore-cancel').addEventListener('click', () => restoreDialog.close());
 restoreDialog.addEventListener('close', () => {
   $('#restore-pass').value = ''; // never keep the passphrase around
 });
-$('#restore-folder').addEventListener('change', loadBackupList);
+$('#restore-folder').addEventListener('change', () => loadBackupList());
 $('#restore-file').addEventListener('change', resetRestore);
-$('#restore-pass').addEventListener('input', () => { if (restoreStage === 'apply') resetRestore(); });
+$('#restore-pass').addEventListener('input', () => {
+  if (restoreStage === 'apply') resetRestore();
+});
 
 $('#restore-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -742,8 +927,8 @@ $('#restore-form').addEventListener('submit', async (e) => {
   go.disabled = true;
   try {
     if (restoreStage === 'open') {
-      go.textContent = 'Opening...';
-      showRestoreChoices(await postJson('/api/backup/inspect', { file, passphrase }));
+      go.textContent = 'Opening…';
+      showRestoreChoices(await post('/api/backup/inspect', { file, passphrase }));
       restoreStage = 'apply';
       go.textContent = 'Restore selected';
     } else {
@@ -751,16 +936,17 @@ $('#restore-form').addEventListener('submit', async (e) => {
         .map((c) => c.value)
         .filter((v) => v !== 'on');
       if (!parts.length) throw new Error('Tick what to restore.');
-      go.textContent = 'Restoring...';
-      const out = await postJson('/api/backup/restore', { file, passphrase, parts, replaceVault: $('#restore-replace-vault').checked });
+      go.textContent = 'Restoring…';
+      const out = await post('/api/backup/restore', { file, passphrase, parts, replaceVault: $('#restore-replace-vault').checked });
       restoreDialog.close();
       const who = `[${out.account}]`;
       if (out.parts.vault) log(`${who} Restore: logins put in the Vault: ${out.parts.vault.written}, kept as they were: ${out.parts.vault.kept}`);
       for (const k of ['config', 'desktop']) {
         if (out.parts[k]) log(`${who} Restore: ${k}: ${out.parts[k].copied} files added, ${out.parts[k].skipped} already there (left alone) in ${out.parts[k].target}`);
       }
-      if (out.parts.vault?.written) log(`${who} Next: use the "From the Vault" buttons to load the logins onto this Mac.`);
+      if (out.parts.vault?.written) log(`${who} Next: use the "Load from Vault" buttons to bring the logins onto this Mac.`);
       loadVaultAccounts();
+      for (const id of Object.keys(vaultInfo)) loadVault(id);
     }
   } catch (err) {
     error.textContent = err.message;
@@ -771,10 +957,8 @@ $('#restore-form').addEventListener('submit', async (e) => {
 });
 
 refresh();
-refreshDesktop();
 loadVaultAccounts();
 setInterval(refresh, 2000);
-setInterval(refreshDesktop, 5000);
 setInterval(loadVaultAccounts, 30000);
 </script>
 </body>

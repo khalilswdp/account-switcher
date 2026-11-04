@@ -17,9 +17,9 @@
 //                                                             Claude.<name>, vault -> the Vault)
 //
 // What goes in (everything that cannot be re-downloaded):
-//   vault/            the three logins (desktop cookie, browser session, CLI login) in exactly the format
-//                     the Vault holds, so "restore --to-vault" followed by the dashboard's Load buttons
-//                     brings an account back on any Mac
+//   vault/            the two logins (desktop cookie, CLI login) in exactly the format the Vault holds,
+//                     so "restore --to-vault" followed by the dashboard's Load buttons brings an
+//                     account back on any Mac
 //   claude-config/    the Claude Code config folder: conversation history, settings, skills, plugins
 //                     (~/.claude for main, ~/.claude-<name> for the others), without caches
 //   claude.json       ~/.claude.json, for the default config folder
@@ -49,7 +49,6 @@ const SCRIPTS = path.dirname(new URL(import.meta.url).pathname);
 const SUPPORT = process.env.SUPPORT_DIR || path.join(os.homedir(), 'Library/Application Support');
 const SWAP_STATE_DIR = process.env.SWAP_STATE_DIR || path.join(os.homedir(), '.claude-desktop-accounts');
 const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || 'accounts.json';
-const BACKUP_DIR = process.env.BACKUP_DIR || '.backups';
 const expand = (p) => (p === '~' ? os.homedir() : p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
 const exists = (p) => fs.access(p).then(() => true, () => false);
 const log = (msg) => process.stderr.write(`${msg}\n`);
@@ -204,11 +203,7 @@ function pushInto(stage, script, name) {
     p.stderr.on('data', (d) => (err += d));
     p.on('close', (code) => {
       const line = (code === 0 ? out : err).trim().split('\n')[0] ?? '';
-      resolve({
-        ok: code === 0,
-        // the push scripts name a path inside the temporary staging folder: drop it, it means nothing to the user
-        message: line.replace(/^Error:\s*/, '').replace(/\s*\(that writes [^)]*\)/, ''),
-      });
+      resolve({ ok: code === 0, message: line.replace(/^Error:\s*/, '') });
     });
   });
 }
@@ -223,11 +218,9 @@ async function backup(name, toArg, replace = false) {
     await fs.mkdir(path.join(stage, '.work', 'b'), { recursive: true });
     await fs.mkdir(folder, { recursive: true, mode: 0o700 });
 
-    // 1. the three logins, in Vault format
-    const real = path.join(BACKUP_DIR, `${name}.json`);
-    if (await exists(real)) await fs.copyFile(real, path.join(stage, '.work', 'b', `${name}.json`));
+    // 1. the two logins, in Vault format
     const parts = {};
-    for (const [part, script] of [['desktop', 'desktop-vault.mjs'], ['browser', 'vault.mjs'], ['cli', 'cli-vault.mjs']]) {
+    for (const [part, script] of [['desktop', 'desktop-vault.mjs'], ['cli', 'cli-vault.mjs']]) {
       log(`Reading the ${part} login...`);
       parts[part] = await pushInto(stage, script, name);
       log(`  ${part}: ${parts[part].ok ? 'saved' : `skipped (${parts[part].message})`}`);
@@ -277,7 +270,7 @@ async function backup(name, toArg, replace = false) {
       '  node scripts/backup.mjs verify <this file>',
       '  node scripts/backup.mjs restore <this file> --out <new folder> --to-vault',
       '',
-      'The vault/ folder holds the three logins in the Vault format. After "restore --to-vault",',
+      'The vault/ folder holds the logins in the Vault format. After "restore --to-vault",',
       'use the dashboard\'s "From the Vault" buttons to load them onto a Mac.',
       'claude-config/ is the Claude Code folder (history, settings, skills, plugins).',
     ].join('\n'));
@@ -365,7 +358,9 @@ async function putVault(root, replace, say = () => {}) {
       if (e.isDirectory()) await walk(path.join(dir, e.name), `${prefix}${e.name}/`);
       else if (e.name.endsWith('.json')) {
         const id = `${prefix}${e.name.replace(/\.json$/, '')}`;
-        if (!replace && (await provider().read(id))) {
+        if (!id.includes('/')) {
+          say(`skipped ${id}: a browser session from an older backup (the browser part is no longer used)`);
+        } else if (!replace && (await provider().read(id))) {
           result.kept++;
           say(`kept the Vault's existing entry for ${id} (use --force to replace it)`);
         } else {
