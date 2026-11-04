@@ -33,12 +33,6 @@
 
     <div id="cards" class="mt-6 grid gap-4 sm:grid-cols-2"></div>
 
-    <section id="desktop" class="mt-6 hidden rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <h2 class="text-sm font-semibold">Claude desktop app</h2>
-      <p id="desktop-info" class="mt-2 text-xs text-zinc-500"></p>
-      <div id="desktop-actions" class="mt-3 flex flex-wrap gap-2"></div>
-    </section>
-
     <h2 class="mt-8 text-sm font-medium text-zinc-500">Activity</h2>
     <div id="log" class="mt-2 h-48 overflow-y-auto rounded-lg bg-black p-3 font-mono text-xs leading-5 text-zinc-300"></div>
   </main>
@@ -239,6 +233,8 @@ function card(a) {
   el.append(head);
 
   el.append(h('p', 'mt-3 font-mono text-xs text-zinc-500', `CLI config: ${a.cliConfigDir ?? 'default (~/.claude)'}`));
+  const dc = desktopControl(a);
+  if (dc?.note) el.append(h('p', `mt-1 text-xs ${dc.dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400'}`, dc.note));
   if (a.lastResult) {
     el.append(h('p', 'mt-3 break-words text-xs text-zinc-500', `Last task: "${a.lastResult.title}" (${a.lastResult.cookies} cookies)`));
   }
@@ -287,6 +283,12 @@ function card(a) {
   } else {
     btn('Login / Sync Session', 'bg-violet-600 text-white hover:bg-violet-500', 'login', 'Login window opened', a.status === 'busy');
     btn('Open Claude Code', 'bg-zinc-800 text-white hover:bg-zinc-700 dark:bg-zinc-200 dark:text-zinc-900 dark:hover:bg-zinc-300', 'cli', 'Terminal opened');
+    if (dc?.button) {
+      const sw = h('button', `${BTN} border border-violet-400 text-violet-700 hover:bg-violet-50 dark:border-violet-500 dark:text-violet-300 dark:hover:bg-violet-950`, 'Switch Claude app to this');
+      sw.disabled = desktopBusy || desktop.switching || inFlight.has(a.id);
+      sw.addEventListener('click', () => switchDesktop(a));
+      actions.append(sw);
+    }
     btn('Run test task', 'text-xs text-zinc-500 hover:text-zinc-300', 'task', 'Task', !['ready', 'login_required'].includes(a.status));
     const backupBtn = h('button', `${BTN} text-xs text-zinc-500 hover:text-zinc-300`, 'Back up...');
     backupBtn.disabled = inFlight.has(a.id) || a.status === 'busy';
@@ -324,89 +326,50 @@ async function refresh() {
   }
 }
 
-// ------------------------------------------------------- desktop app switcher
+// --------------------------------------------- Claude desktop app, one control per account
 
-let desktop = null;
+let desktop = null; // { supported, active, parked, running, switching } from /api/desktop
 let desktopBusy = false;
-const nameOf = (id) => accounts.find((a) => a.id === id)?.label ?? id;
 
-function renderDesktop() {
-  const sec = $('#desktop');
-  if (!desktop || !desktop.supported) return sec.classList.add('hidden');
-  sec.classList.remove('hidden');
-
-  const info = $('#desktop-info');
-  const actions = $('#desktop-actions');
-  actions.replaceChildren();
-
-  if (!desktop.active) {
-    info.textContent = 'Not set up yet. In Terminal.app run: ./scripts/desktop-swap.sh init <account currently signed in>';
-    return;
-  }
-  info.textContent = `Active: ${nameOf(desktop.active)}  |  App: ${desktop.running ? 'running' : 'not running'}`;
-
-  // Real accounts (from accounts.json) get a button; any other parked folder (experiments,
-  // test copies) goes into one dropdown so the panel stays short.
-  const known = new Set(accounts.map((a) => a.id));
-  const mine = desktop.parked.filter((n) => known.has(n));
-  const other = desktop.parked.filter((n) => !known.has(n));
-  const locked = desktopBusy || desktop.switching;
-
-  if (!desktop.parked.length) {
-    actions.append(h('span', 'text-xs text-zinc-500', 'No other desktop account yet. Create one with: ./scripts/desktop-swap.sh new <name>'));
-  }
-  for (const name of mine) {
-    const b = h('button', `${BTN} bg-violet-600 text-white hover:bg-violet-500`, `Switch to ${nameOf(name)}`);
-    b.disabled = locked;
-    b.addEventListener('click', () => switchDesktop(name));
-    actions.append(b);
-  }
-  if (other.length) {
-    const box = h('details', 'mt-1 w-full text-xs text-zinc-500');
-    box.append(h('summary', 'cursor-pointer select-none', `Other folders (${other.length})`));
-    const row = h('div', 'mt-2 flex flex-wrap items-center gap-2');
-    const pick = h('select', 'rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700');
-    for (const name of other) pick.append(h('option', 'text-black', name));
-    const go = h('button', `${BTN} ${OUTLINE}`, 'Switch');
-    go.disabled = locked;
-    go.addEventListener('click', () => switchDesktop(pick.value));
-    row.append(pick, go);
-    box.append(row);
-    actions.append(box);
-  }
+// What a card says and offers about the Claude app: it is on this account, it can be switched to it,
+// or there is nothing to switch to yet.
+function desktopControl(a) {
+  if (!desktop?.supported) return null;
+  if (!desktop.active) return { note: 'Claude app: not set up yet (run ./scripts/desktop-swap.sh init <account signed in>)', dim: true };
+  if (a.id === desktop.active) return { note: `Claude app: opens on this account${desktop.running ? ' (running now)' : ''}` };
+  if (!desktop.parked.includes(a.id)) return { note: 'Claude app: no folder for this account yet (Load > Desktop from the Vault)', dim: true };
+  return { button: true };
 }
 
-async function switchDesktop(name) {
+async function switchDesktop(a) {
   const warning = desktop.running
-    ? 'The Claude app will QUIT (this ends any session open in it, including Claude Code sessions) and then reopen as the other account.'
+    ? 'The Claude app will QUIT (this ends any session open in it, including Claude Code sessions) and then reopen on this account.'
     : 'The Claude app is not running, so this only changes which account it opens next.';
-  if (!confirm(`Switch the Claude desktop app to "${nameOf(name)}"?\n\n${warning}`)) return;
+  if (!confirm(`Switch the Claude desktop app to "${a.label}"?\n\n${warning}`)) return;
 
   desktopBusy = true;
-  renderDesktop();
-  log(`[desktop] Switching to ${nameOf(name)}...`);
+  render();
+  log(`[${a.id}] Switching the Claude app to this account...`);
   try {
-    const res = await fetch(`/api/desktop/switch/${encodeURIComponent(name)}`, { method: 'POST' });
+    const res = await fetch(`/api/desktop/switch/${encodeURIComponent(a.id)}`, { method: 'POST' });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || res.statusText);
-    log(`[desktop] Now on ${nameOf(name)}${body.relaunched ? ' (app reopened)' : ''}`);
+    log(`[${a.id}] The Claude app is now on this account${body.relaunched ? ' (reopened)' : ''}`);
   } catch (e) {
-    log(`[desktop] Switch failed: ${e.message}`, true);
+    log(`[${a.id}] Switching the Claude app failed: ${e.message}`, true);
   } finally {
     desktopBusy = false;
-    refreshDesktop();
+    await refreshDesktop();
+    render();
   }
 }
 
-let desktopKey = '';
 async function refreshDesktop() {
   try {
-    desktop = await (await fetch('/api/desktop')).json();
-    // Re-render only when something changed, so an open dropdown is not reset every 5 s.
-    const key = JSON.stringify([desktop, desktopBusy, accounts.map((a) => a.id + a.label)]);
-    if (key === desktopKey) return;
-    desktopKey = key;
-    renderDesktop();
+    const next = await (await fetch('/api/desktop')).json();
+    const changed = JSON.stringify(next) !== JSON.stringify(desktop);
+    desktop = next;
+    if (changed) render(); // the cards show which account the Claude app is on
   } catch {
     /* server restarting: next poll retries */
   }

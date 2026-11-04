@@ -20,6 +20,7 @@ const run = promisify(execFile);
 const PORT = Number(process.env.PORT) || 3000;
 const LOGIN_URL = process.env.LOGIN_URL || 'https://claude.ai/login';
 const TASK_URL = process.env.TASK_URL || 'https://claude.ai/';
+const SESSION_COOKIE = process.env.SESSION_COOKIE_NAME || 'sessionKey'; // the cookie that means "signed in to claude.ai"
 const PROFILES_DIR = process.env.PROFILES_DIR || '.profiles';
 const BACKUP_DIR = process.env.BACKUP_DIR || '.backups'; // storageState safety copies
 const LEGACY_DIR = process.env.LEGACY_STATE_DIR || '.state'; // sessions from the earlier version
@@ -137,6 +138,28 @@ const open = (id, headless) =>
     headless,
     viewport: headless ? undefined : null,
   });
+
+// Writes the profile's CURRENT session to .backups/<id>.json, which is what the Vault push and the
+// full backup read. The profile is the source of truth, so saving never depends on a task having
+// run earlier (that used to be the only thing that wrote this file).
+async function exportSession(id) {
+  const rt = runtime[id];
+  if (rt.mode !== 'idle') throw httpError(409, `the account is busy (${rt.mode}), try again in a moment`);
+  if (!(await isReady(id))) throw httpError(409, 'the browser profile is not signed in yet: use "Login / Sync Session" first');
+  rt.mode = 'busy';
+  let context;
+  try {
+    context = await open(id, true);
+    const state = await context.storageState();
+    if (!state.cookies.some((c) => c.name === SESSION_COOKIE)) {
+      throw httpError(409, 'the browser profile is not signed in to claude.ai: use "Login / Sync Session" first');
+    }
+    await saveBackup(id, context);
+  } finally {
+    await context?.close().catch(() => {});
+    rt.mode = 'idle';
+  }
+}
 
 // -------------------------------------------------------- startup housekeeping
 
@@ -454,7 +477,14 @@ async function saveToVault(id, parts = PARTS) {
   try {
     const out = {};
     if (parts.includes('desktop')) out.desktop = await runScript('desktop-vault.mjs', ['push', id]); // may show the Keychain prompt
-    if (parts.includes('browser')) out.browser = await runScript('vault.mjs', ['push', id]);
+    if (parts.includes('browser')) {
+      try {
+        await exportSession(id); // refresh .backups/<id>.json from the profile first
+        out.browser = await runScript('vault.mjs', ['push', id]);
+      } catch (e) {
+        out.browser = { ok: false, message: e.message };
+      }
+    }
     if (parts.includes('cli')) out.cli = await runScript('cli-vault.mjs', ['push', id]); // may show the Keychain prompt
     return out;
   } finally {
@@ -576,6 +606,7 @@ function runWithStdin(script, args, input, timeoutMs) {
 async function backupAccount(id, folder, passphrase, replace = false) {
   if (typeof passphrase !== 'string' || passphrase.length < 12) throw httpError(400, 'the passphrase must be at least 12 characters');
   if (typeof folder !== 'string' || !folder.trim()) throw httpError(400, 'choose a folder for the backup file');
+  await exportSession(id).catch(() => {}); // best effort: put the profile's current session where the backup reads it
   return runBackupTool(['backup', id, '--to', folder.trim(), ...(replace ? ['--replace'] : [])], passphrase);
 }
 
