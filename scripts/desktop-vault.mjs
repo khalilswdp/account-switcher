@@ -19,6 +19,8 @@
 // ever printed.
 //   VAULT_ALLOWED_ACCOUNTS  comma list, default "test"
 //   DESKTOP_ITEMS           comma list of items to store instead (config.json, "Local Storage", ...)
+//   DESKTOP_COOKIES         comma list of cookie names to keep, default "sessionKey,anthropic-consent-preferences"
+//                           ("*" keeps all of them)
 import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -37,6 +39,9 @@ const ALLOWED = (process.env.VAULT_ALLOWED_ACCOUNTS || 'test').split(',').map((s
 // Tested on 2026-11-04: the app starts signed in from the Cookies file alone (config.json alone
 // does not). Everything else it rebuilds itself, so only the cookies are stored.
 const ITEMS = (process.env.DESKTOP_ITEMS || 'Cookies').split(',').map((s) => s.trim()).filter(Boolean);
+// Also tested: of the cookies, sessionKey alone signs the app in; anthropic-consent-preferences
+// only stops the cookie banner. Everything else the app recreates. "*" keeps every cookie.
+const COOKIES = (process.env.DESKTOP_COOKIES || 'sessionKey,anthropic-consent-preferences').split(',').map((s) => s.trim()).filter(Boolean);
 const MAX_ENTRY = 700_000; // bytes of the stored envelope; Vault's default entry limit is about 1 MiB
 
 const validName = (n) => /^[\w-]+$/.test(n ?? '') || fail('account name may only use letters, digits, - and _');
@@ -100,6 +105,13 @@ async function packCookies(file, key) {
     await fs.copyFile(file, copy);
     const db = new DatabaseSync(copy);
     const version = Number(db.prepare("select value from meta where key='version'").get().value);
+    if (!COOKIES.includes('*')) {
+      db.prepare(`delete from cookies where name not in (${COOKIES.map(() => '?').join(',')})`).run(...COOKIES);
+    }
+    if (db.prepare('select count(*) as n from cookies').get().n === 0) {
+      db.close();
+      fail(`none of the cookies to store (${COOKIES.join(', ')}) were found. Is this account signed in?`);
+    }
     const values = {};
     for (const r of db.prepare('select rowid as id, host_key, encrypted_value from cookies').all()) {
       let v;
@@ -112,6 +124,7 @@ async function packCookies(file, key) {
       if (v) values[r.id] = v.toString('base64');
     }
     db.exec("update cookies set encrypted_value = x''"); // the old ciphertext is useless elsewhere
+    db.exec('vacuum'); // and no deleted rows linger in free pages
     db.close();
     return { kind: 'cookies', version, db: (await fs.readFile(copy)).toString('base64'), values };
   } finally {
