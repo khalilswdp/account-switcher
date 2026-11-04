@@ -73,6 +73,25 @@ const SAVE_CONFIRM = {
   cli: (a) => `Save the Claude Code (CLI) login for "${a.label}" to the Vault?\n\nThis is the login the CLI keeps in this Mac's Keychain. macOS may ask to allow Keychain access: click Allow.`,
 };
 
+// The Keychain's "20261104144455Z" style timestamp as a Date
+const keychainTime = (s) => {
+  const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/.exec(s ?? '');
+  return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6])) : null;
+};
+
+const LOAD_CONFIRM = {
+  desktop: (a) => `Load the desktop login for "${a.label}" from the Vault and switch the Claude app to it?\n\nThe Claude app will QUIT (ending any open session, including Claude Code sessions) and reopen on this account. The saved cookie is merged into that account's folder; nothing else there is touched. macOS will ask to allow Keychain access: click Allow.`,
+  browser: (a) => `Load the browser (claude.ai) session for "${a.label}" from the Vault?\n\nIt is merged into this account's browser profile: cookies with the same name are replaced, everything else stays.`,
+  cli: (a, vi) => {
+    const vault = vi?.cli?.vault && new Date(vi.cli.vault.pushedAt);
+    const local = keychainTime(vi?.cli?.local?.modified);
+    const warn = vault && local && local > vault
+      ? `\n\nWARNING: this Mac's login (${when(local)}) is NEWER than the Vault copy (${when(vault)}). Loading it may sign you out.`
+      : '';
+    return `Load the Claude Code (CLI) login for "${a.label}" from the Vault and open Terminal as it?\n\nThis REPLACES the login this Mac has now for that account.${warn}\n\nmacOS may ask to allow Keychain access: click Allow.`;
+  },
+};
+
 // [text, dim?] for one part of the "Saved in the Vault" box
 function vaultText(part, describe) {
   if (!part) return ['checking...', true];
@@ -105,6 +124,10 @@ async function call(id, action, label) {
       log(`[${id}] ${state}: "${body.title}" (${body.cookies} cookies, ${body.url})`, body.loggedIn === false);
     } else if (action === 'cli') {
       log(`[${id}] Terminal opened with Claude Code (${body.command})`);
+    } else if (action.startsWith('vault/load')) {
+      log(`[${id}] Loaded from the Vault: ${body.message}`);
+      loadVault(id);
+      refreshDesktop();
     } else if (action.startsWith('vault')) {
       if (body.desktop) log(`[${id}] Vault, desktop app: ${body.desktop.message}`, !body.desktop.ok);
       if (body.browser) log(`[${id}] Vault, browser session: ${body.browser.message}`, !body.browser.ok);
@@ -146,12 +169,25 @@ function card(a) {
     left.append(h('div', 'text-zinc-500', name), h('div', dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400', text));
     r.append(left);
     if (part) {
-      const b = h('button', 'shrink-0 rounded border border-zinc-300 px-2 py-1 text-[11px] font-medium hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:hover:bg-zinc-700', 'Save');
-      b.disabled = inFlight.has(a.id) || a.status === 'busy';
-      b.addEventListener('click', () => {
+      const locked = inFlight.has(a.id) || a.status === 'busy' || a.status === 'login';
+      const small = 'rounded border px-2 py-1 text-[11px] font-medium hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-700';
+      const group = h('div', 'flex shrink-0 gap-1');
+      const save = h('button', `${small} border-zinc-300 dark:border-zinc-600`, 'Save');
+      save.disabled = locked;
+      save.addEventListener('click', () => {
         if (confirm(SAVE_CONFIRM[part](a))) call(a.id, `vault?parts=${part}`, 'Saved to Vault');
       });
-      r.append(b);
+      group.append(save);
+      // Load only makes sense when the Vault has something for this part.
+      if (vi?.[part]?.state === 'ok' && vi[part].vault) {
+        const load = h('button', `${small} border-violet-400 text-violet-700 dark:border-violet-500 dark:text-violet-300`, 'Load');
+        load.disabled = locked;
+        load.addEventListener('click', () => {
+          if (confirm(LOAD_CONFIRM[part](a, vi))) call(a.id, `vault/load?part=${part}`, 'Load from Vault');
+        });
+        group.append(load);
+      }
+      r.append(group);
     }
     box.append(r);
   };

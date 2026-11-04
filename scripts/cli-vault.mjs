@@ -3,7 +3,9 @@
 //
 //   node scripts/cli-vault.mjs status [name] [--json]
 //   node scripts/cli-vault.mjs push <name> [--force]            read the Keychain item, store it
-//   node scripts/cli-vault.mjs pull <name> [--config <folder>]  write it into this Mac's Keychain
+//   node scripts/cli-vault.mjs pull <name> [--config <folder>] [--replace]
+//                                                               write it into this Mac's Keychain
+//                                                               (--replace overwrites an existing login)
 //
 // The CLI keeps its login in a plain Keychain item: service "Claude Code-credentials" for the
 // default config folder (~/.claude), or "Claude Code-credentials-<8 hex of sha256(path)>" for
@@ -82,13 +84,14 @@ async function readSecret(service) {
 
 // `security -i` takes the command on stdin, so the login never appears in a process list.
 // The value goes in as hex to avoid any quoting problem.
-function writeSecret(service, secret) {
+function writeSecret(service, secret, replace = false) {
   return new Promise((resolve, reject) => {
     const p = spawn('security', ['-i'], { stdio: ['pipe', 'ignore', 'pipe'] });
     let err = '';
     p.stderr.on('data', (d) => (err += d));
     p.on('close', () => (/error|fail/i.test(err) ? reject(new Error('could not write the Keychain item')) : resolve()));
-    p.stdin.end(`add-generic-password -s "${service}" -a "${KEYCHAIN_USER}" -X ${Buffer.from(secret).toString('hex')}\n`);
+    // -U updates an existing item instead of failing
+    p.stdin.end(`add-generic-password -s "${service}" -a "${KEYCHAIN_USER}" -X ${Buffer.from(secret).toString('hex')}${replace ? ' -U' : ''}\n`);
   });
 }
 
@@ -156,21 +159,22 @@ async function push(name, force) {
   console.log(`Pushed the "${name}" CLI login (${credential.length} bytes) at ${pushedAt}.`);
 }
 
-async function pull(name, configArg) {
+async function pull(name, configArg, replace = false) {
   checkAllowed(name);
   const configDir = configArg ? path.resolve(expand(configArg)) : configDirOf(name);
   const service = serviceFor(configDir);
-  if (await itemInfo(service)) {
-    fail(`a CLI login already exists for ${configDir} (Keychain item "${service}"), refusing to overwrite. Pull into another folder with --config <path>.`);
+  const existing = await itemInfo(service);
+  if (existing && !replace) {
+    fail(`a CLI login already exists for ${configDir} (Keychain item "${service}"), refusing to overwrite. Pull into another folder with --config <path>, or add --replace to replace it.`);
   }
   const remote = await readRemote(name);
   if (!remote) fail(`nothing in the vault for "${name}" yet`);
 
-  await writeSecret(service, remote.credential);
+  await writeSecret(service, remote.credential, replace);
   if (!(await itemInfo(service))) fail('the Keychain item was not created');
   await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
   await writeFile0600(revFile(name), remote.pushedAt);
-  console.log(`Pulled "${name}" into the Keychain item for ${configDir}.`);
+  console.log(`${existing ? 'Replaced the login for' : 'Pulled'} "${name}" ${existing ? 'in' : 'into'} the Keychain item for ${configDir}.`);
   console.log(`Use it with: CLAUDE_CONFIG_DIR=${configDir} CLAUDE_SECURESTORAGE_CONFIG_DIR=${configDir} claude`);
 }
 
@@ -180,8 +184,8 @@ try {
   if (cmd === 'status') {
     for (const n of name ? [name] : ALLOWED) await status(n, rest.includes('--json'));
   } else if (cmd === 'push') await push(name, rest.includes('--force'));
-  else if (cmd === 'pull') await pull(name, ci >= 0 ? rest[ci + 1] : undefined);
-  else fail('usage: cli-vault.mjs <status [name] [--json] | push <name> [--force] | pull <name> [--config <folder>]>');
+  else if (cmd === 'pull') await pull(name, ci >= 0 ? rest[ci + 1] : undefined, rest.includes('--replace'));
+  else fail('usage: cli-vault.mjs <status [name] [--json] | push <name> [--force] | pull <name> [--config <folder>] [--replace]>');
 } catch (e) {
   fail(e.message);
 }

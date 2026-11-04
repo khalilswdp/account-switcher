@@ -153,9 +153,24 @@ async function importLegacy(id) {
   if (!state) return;
 
   rt.mode = 'busy';
+  try {
+    await applyState(id, state);
+    await markReady(id);
+    console.log(`[${id}] Imported existing session from ${path.basename(source)} (${state.cookies.length} cookies)`);
+  } catch (e) {
+    console.error(`[${id}] Session import failed: ${e.message.split('\n')[0]}`);
+  } finally {
+    rt.mode = 'idle';
+  }
+}
+
+// Writes a saved session (storageState JSON) into the account's profile: cookies replace
+// ones with the same name, the rest of the profile is left alone. The caller holds the
+// account (mode flag), because a profile can only be open in one browser at a time.
+async function applyState(id, state) {
   let context;
   try {
-    await fs.mkdir(a.profileDir, { recursive: true });
+    await fs.mkdir(ACCOUNTS[id].profileDir, { recursive: true });
     context = await open(id, true);
     await context.addCookies(state.cookies);
     for (const { origin, localStorage: items = [] } of state.origins ?? []) {
@@ -169,15 +184,8 @@ async function importLegacy(id) {
       } catch {}
       await page.close();
     }
-    await context.close();
-    context = null;
-    await markReady(id);
-    console.log(`[${id}] Imported existing session from ${path.basename(source)} (${state.cookies.length} cookies)`);
-  } catch (e) {
-    console.error(`[${id}] Session import failed: ${e.message.split('\n')[0]}`);
   } finally {
-    await context?.close().catch(() => {});
-    rt.mode = 'idle';
+    await context?.close().catch(() => {}); // closing flushes the profile to disk
   }
 }
 
@@ -342,11 +350,26 @@ async function desktopState() {
   return state;
 }
 
-async function switchDesktop(name) {
+// Switching and loading both quit the app, so the dashboard must not run inside it.
+function guardDesktopApp() {
   if (process.platform !== 'darwin') throw httpError(501, 'The desktop switcher is only supported on macOS');
   if (process.env.__CFBundleIdentifier === 'com.anthropic.claudefordesktop') {
-    throw httpError(409, 'The dashboard is running inside the Claude desktop app, which this switch would quit. Start it from Terminal.app.');
+    throw httpError(409, 'The dashboard is running inside the Claude desktop app, which this would quit. Start it from Terminal.app.');
   }
+}
+
+async function quitDesktopApp() {
+  await run('osascript', ['-e', 'tell application "Claude" to quit']).catch(() => {});
+  for (let i = 0; i < 40 && (await desktopState()).running; i++) await sleep(500); // up to 20 s
+  if ((await desktopState()).running) {
+    throw httpError(409, 'Claude did not quit (an unsaved change or a dialog?). Quit it yourself and try again.');
+  }
+}
+
+const openDesktopApp = () => run('open', ['-a', 'Claude']).catch(() => {});
+
+async function switchDesktop(name) {
+  guardDesktopApp();
   if (switching) throw httpError(409, 'A desktop switch is already in progress');
   switching = true;
   try {
@@ -355,19 +378,13 @@ async function switchDesktop(name) {
     if (name === state.active) return { ok: true, active: name, note: 'already active' };
     if (!state.parked.includes(name)) throw httpError(404, `No parked desktop account named ${name}`);
 
-    if (state.running) {
-      await run('osascript', ['-e', 'tell application "Claude" to quit']).catch(() => {});
-      for (let i = 0; i < 40 && (await desktopState()).running; i++) await sleep(500); // up to 20 s
-      if ((await desktopState()).running) {
-        throw httpError(409, 'Claude did not quit (an unsaved change or a dialog?). Quit it yourself and try again.');
-      }
-    }
+    if (state.running) await quitDesktopApp();
     try {
       await run('bash', [SWAP_SCRIPT, 'use', name]);
     } catch (e) {
       throw httpError(500, failText(e));
     }
-    if (state.running) await run('open', ['-a', 'Claude']).catch(() => {}); // reopen only if it was open
+    if (state.running) await openDesktopApp(); // reopen only if it was open
     return { ok: true, active: name, relaunched: state.running };
   } finally {
     switching = false;
@@ -412,6 +429,73 @@ async function saveToVault(id, parts = PARTS) {
     vaulting = false;
   }
 }
+
+// ----------------------------------------------------- Load from the Vault
+
+// The opposite of Save: bring one part back from the Vault and switch to it. Each loader returns
+// { ok, message }. Nothing here prints a secret; the scripts do the work.
+
+// Desktop: put the saved login cookie into the account's folder (merged, nothing else touched),
+// then make that account the one the Claude app opens. The app has to be quit for this, and is
+// reopened afterwards if it was open.
+async function loadDesktop(id) {
+  guardDesktopApp();
+  if (switching) throw httpError(409, 'A desktop switch is already in progress');
+  switching = true;
+  try {
+    const state = await desktopState();
+    if (!state.active) throw httpError(409, 'Not set up. In Terminal run: ./scripts/desktop-swap.sh init <account-now-signed-in>');
+    if (state.running) await quitDesktopApp();
+
+    const r = await runScript('desktop-vault.mjs', ['load', id]); // may show the Keychain prompt
+    if (!r.ok) {
+      if (state.running) await openDesktopApp(); // leave things as they were
+      throw httpError(500, r.message);
+    }
+    let note = '';
+    if (id !== state.active) {
+      try {
+        await run('bash', [SWAP_SCRIPT, 'use', id]);
+        note = ` The Claude app now opens "${id}".`;
+      } catch (e) {
+        if (state.running) await openDesktopApp();
+        throw httpError(500, failText(e));
+      }
+    }
+    if (state.running) await openDesktopApp();
+    return { ok: true, message: r.message + note, switched: id !== state.active };
+  } finally {
+    switching = false;
+  }
+}
+
+// Browser: replace cookies in the account's profile with the saved session.
+async function loadBrowser(id) {
+  const rt = runtime[id];
+  if (rt.mode !== 'idle') throw httpError(409, `Account is busy (${rt.mode})`);
+  rt.mode = 'busy';
+  try {
+    const r = await runScript('vault.mjs', ['pull', id, '--force']); // writes .backups/<id>.json
+    if (!r.ok) throw httpError(500, r.message);
+    const state = JSON.parse(await fs.readFile(ACCOUNTS[id].backupFile, 'utf8'));
+    await applyState(id, state);
+    await markReady(id);
+    rt.loggedOut = false;
+    return { ok: true, message: `Loaded the saved browser session (${state.cookies.length} cookies) into the "${id}" profile.` };
+  } finally {
+    rt.mode = 'idle';
+  }
+}
+
+// CLI: replace this Mac's Claude Code login for the account, then open Terminal as it.
+async function loadCli(id) {
+  const r = await runScript('cli-vault.mjs', ['pull', id, '--replace']); // may show the Keychain prompt
+  if (!r.ok) throw httpError(500, r.message);
+  await openCli(id);
+  return { ok: true, message: `${r.message} Opened Terminal as this account.` };
+}
+
+const LOADERS = { desktop: loadDesktop, browser: loadBrowser, cli: loadCli };
 
 // What is in the Vault for one account, per part. Counts and times only, never values.
 async function scriptStatus(script, id) {
@@ -488,6 +572,17 @@ app.post('/api/accounts/:id/vault', async (req, res) => {
     throw httpError(400, `parts must be ${PARTS.join(' and/or ')}`);
   }
   res.json(await saveToVault(req.params.id, wanted));
+});
+app.post('/api/accounts/:id/vault/load', async (req, res) => {
+  const load = LOADERS[String(req.query.part)];
+  if (!load) throw httpError(400, `part must be one of ${Object.keys(LOADERS).join(', ')}`);
+  if (vaulting) throw httpError(409, 'A Vault save or load is already in progress');
+  vaulting = true;
+  try {
+    res.json(await load(req.params.id));
+  } finally {
+    vaulting = false;
+  }
 });
 app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
 app.post('/api/accounts/:id/reset', async (req, res) => res.json(await resetProfile(req.params.id)));

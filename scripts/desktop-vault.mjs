@@ -4,6 +4,7 @@
 //   node scripts/desktop-vault.mjs status [name]
 //   node scripts/desktop-vault.mjs push <name> [--force]      read the account's files, decrypt, upload
 //   node scripts/desktop-vault.mjs pull <name> [--as <new>]   rebuild it as a parked account on this Mac
+//   node scripts/desktop-vault.mjs load <name>                merge the saved login into the account's own folder
 //
 // Why decrypted: the desktop app encrypts its cookies and login token with a per-Mac key
 // held in the Keychain ("Claude Safe Storage"). That key is a long-lived master secret, so
@@ -205,6 +206,38 @@ async function unpackItem(name, item, root, key) {
   }
 }
 
+// Adds or replaces the saved cookies inside an EXISTING cookie database, encrypted with this
+// Mac's key. The cookies already there, and everything else in the account folder, stay.
+async function mergeCookies(file, packed, key) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-vault-merge-'));
+  try {
+    const src = path.join(dir, 'Cookies');
+    await fs.writeFile(src, Buffer.from(packed.db, 'base64'));
+    const incoming = new DatabaseSync(src);
+    const select = incoming.prepare('select rowid as _id, * from cookies');
+    select.setReadBigInts(true); // Chromium timestamps do not fit a plain JS integer
+    const rows = select.all();
+    incoming.close();
+
+    const db = new DatabaseSync(file);
+    const version = Number(db.prepare("select value from meta where key='version'").get().value);
+    const columns = new Set(db.prepare('pragma table_info(cookies)').all().map((c) => c.name));
+    const remove = db.prepare('delete from cookies where host_key = ? and name = ? and path = ?');
+    for (const r of rows) {
+      const plain = packed.values[String(r._id)];
+      if (!plain) continue;
+      const { _id, ...row } = r;
+      row.encrypted_value = encryptCookie(Buffer.from(plain, 'base64'), row.host_key, key, version);
+      const use = Object.keys(row).filter((c) => columns.has(c));
+      remove.run(row.host_key, row.name, row.path);
+      db.prepare(`insert into cookies (${use.join(',')}) values (${use.map(() => '?').join(',')})`).run(...use.map((c) => row[c]));
+    }
+    db.close();
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
 // ------------------------------------------------------------------- vault
 
 async function readRemote(name) {
@@ -308,6 +341,30 @@ async function pull(name, asName) {
   console.log(`Switch to it with the dashboard, or: ./scripts/desktop-swap.sh use ${target}`);
 }
 
+// Like pull, but into the account's own folder: the saved cookie is merged into what is there
+// (or the folder is created if missing). The Claude app must not be using that folder.
+async function load(name) {
+  checkAllowed(name);
+  const remote = await readRemote(name);
+  if (!remote) fail(`nothing in the vault for "${name}" yet`);
+  const isActive = activeName() === name;
+  const target = isActive ? activeFolder : parked(name);
+  if (isActive && appRunning()) fail('the Claude app is running and this account is the active one. Quit it (Cmd+Q) first.');
+
+  const key = await readSafeStorageKey({ service: SERVICE }); // THIS Mac's key
+  const items = JSON.parse(gunzipSync(Buffer.from(remote.payload, 'base64')).toString('utf8'));
+  await fs.mkdir(target, { recursive: true, mode: 0o700 });
+  for (const [item, packed] of Object.entries(items)) {
+    if (packed.kind === 'cookies' && (await exists(path.join(target, 'Cookies')))) {
+      await mergeCookies(path.join(target, 'Cookies'), packed, key);
+    } else {
+      await unpackItem(item, packed, target, key);
+    }
+  }
+  await writeFile0600(revFile(name), remote.pushedAt);
+  console.log(`Loaded "${name}" from the vault into ${target}.`);
+}
+
 const [cmd, name, ...rest] = process.argv.slice(2);
 const flag = (f) => rest.includes(f);
 const asIndex = rest.indexOf('--as');
@@ -316,7 +373,8 @@ try {
     for (const n of name ? [name] : ALLOWED) await status(n, flag('--json'));
   } else if (cmd === 'push') await push(name, flag('--force'));
   else if (cmd === 'pull') await pull(name, asIndex >= 0 ? rest[asIndex + 1] : undefined);
-  else fail('usage: desktop-vault.mjs <status [name] | push <name> [--force] | pull <name> [--as <new>]>');
+  else if (cmd === 'load') await load(name);
+  else fail('usage: desktop-vault.mjs <status [name] | push <name> [--force] | pull <name> [--as <new>] | load <name>>');
 } catch (e) {
   fail(e.message);
 }
