@@ -9,6 +9,7 @@
 //   node scripts/vault-local.mjs status
 //   node scripts/vault-local.mjs backup <file> save a snapshot of everything (new-laptop move)
 //   node scripts/vault-local.mjs restore <file>  load a snapshot into a freshly initialised Vault
+//   node scripts/vault-local.mjs purge <entry> delete every version of one entry, e.g. desktop/test
 //   node scripts/vault-local.mjs down          stop the container (data is kept)
 //
 // Secrets live in ~/.claude-switcher-vault (keys.json, token), owner-only, never in git.
@@ -199,6 +200,21 @@ const commands = {
     await ok(res, 'restore');
     console.log('Snapshot restored. Vault is now sealed with the ORIGINAL keys.');
     console.log(`Put the original keys.json at ${KEYS} (from your password manager), then run "unseal" and "token".`);
+  },
+
+  // The Vault keeps old versions of every entry. This deletes ALL versions of one entry, so
+  // an entry that held more than it should have does not linger in its history.
+  async purge(entry) {
+    if (!entry || !/^[\w][\w/-]*$/.test(entry)) fail('usage: purge <entry>, e.g. desktop/test');
+    const root = readKeys().root_token;
+    const route = `secret/metadata/claude-switcher/${entry}`;
+    const meta = await api('GET', route, { token: root });
+    if (meta.status === 404) return console.log(`Nothing stored at claude-switcher/${entry}.`);
+    await ok(meta, 'metadata read');
+    const data = (await meta.json()).data;
+    console.log(`claude-switcher/${entry}: ${Object.keys(data.versions).length} version(s), current is ${data.current_version}.`);
+    await ok(await api('DELETE', route, { token: root }), 'purge');
+    console.log('All versions permanently deleted.');
   },
 
   async down() {

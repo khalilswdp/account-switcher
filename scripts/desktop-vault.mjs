@@ -14,10 +14,11 @@
 // folder "Claude.<name>"; switch to it with the dashboard or `desktop-swap.sh use <name>`.
 // On a Mac that has never run the app, open it once and quit first (that creates the key).
 //
-// Only the files the app needs to start signed in are stored (see ITEMS). Reading the
-// Keychain item makes macOS ask you to allow it. Nothing secret is ever printed.
+// Only the cookie file is stored by default (about 28 KB): it is all the app needs to start
+// signed in. Reading the Keychain item makes macOS ask you to allow it. Nothing secret is
+// ever printed.
 //   VAULT_ALLOWED_ACCOUNTS  comma list, default "test"
-//   DESKTOP_ITEMS           comma list of items to store, to experiment with a smaller set
+//   DESKTOP_ITEMS           comma list of items to store instead (config.json, "Local Storage", ...)
 import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -33,8 +34,9 @@ const SWAP_STATE_DIR = process.env.SWAP_STATE_DIR || path.join(os.homedir(), '.c
 const BACKUP_DIR = process.env.BACKUP_DIR || '.backups';
 const SERVICE = process.env.SAFE_STORAGE_SERVICE || 'Claude Safe Storage';
 const ALLOWED = (process.env.VAULT_ALLOWED_ACCOUNTS || 'test').split(',').map((s) => s.trim()).filter(Boolean);
-const ITEMS = (process.env.DESKTOP_ITEMS || 'config.json,Cookies,Local Storage,Local State,Preferences,ant-did,ant-device-registry.json')
-  .split(',').map((s) => s.trim()).filter(Boolean);
+// Tested on 2026-11-04: the app starts signed in from the Cookies file alone (config.json alone
+// does not). Everything else it rebuilds itself, so only the cookies are stored.
+const ITEMS = (process.env.DESKTOP_ITEMS || 'Cookies').split(',').map((s) => s.trim()).filter(Boolean);
 const MAX_ENTRY = 700_000; // bytes of the stored envelope; Vault's default entry limit is about 1 MiB
 
 const validName = (n) => /^[\w-]+$/.test(n ?? '') || fail('account name may only use letters, digits, - and _');
