@@ -134,7 +134,7 @@ function card(a) {
     el.append(h('p', 'mt-3 break-words text-xs text-zinc-500', `Last task: "${a.lastResult.title}" (${a.lastResult.cookies} cookies)`));
   }
 
-  // What is in the Vault right now, per part. The CLI login can never be stored there.
+  // What is in the Vault right now, per part. The CLI login is not saved to the Vault yet.
   const vi = vaultInfo[a.id];
   const box = h('div', 'mt-3 space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60');
   box.append(h('p', 'font-medium text-zinc-600 dark:text-zinc-300', 'Saved in the Vault'));
@@ -156,7 +156,7 @@ function card(a) {
   };
   line('Desktop app', vaultText(vi?.desktop, () => 'login cookie'), 'desktop');
   line('Browser (claude.ai)', vaultText(vi?.browser, (v) => `${v.cookies} cookies`), 'browser');
-  line('Claude Code CLI', ["can't be saved (run /login on the new laptop)", true]);
+  line('Claude Code CLI', ['not saved yet (run /login on the new laptop)', true]);
   el.append(box);
 
   const actions = h('div', 'mt-4 flex flex-wrap gap-2');

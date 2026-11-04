@@ -407,7 +407,7 @@ async function saveToVault(id, parts = PARTS) {
     if (parts.includes('desktop')) out.desktop = await runScript('desktop-vault.mjs', ['push', id]); // may show the Keychain prompt
     if (parts.includes('browser')) out.browser = await runScript('vault.mjs', ['push', id]);
     if (parts.length === PARTS.length) {
-      out.cli = { ok: true, message: "not saved. Its login lives only in this Mac's Keychain, so run /login once on the new laptop." };
+      out.cli = { ok: true, message: 'not saved yet. For now, run /login once on the new laptop.' };
     }
     return out;
   } finally {
