@@ -374,6 +374,40 @@ async function switchDesktop(name) {
   }
 }
 
+// ------------------------------------------------------- Save to the Vault
+
+// One click saves the minimum needed to run the account on another laptop: the desktop
+// login cookie and, if there is one, the browser session. The two scripts do the work and
+// never print secret values, so only their first output line is passed on.
+const PROJECT_DIR = fileURLToPath(new URL('..', import.meta.url));
+let vaulting = false;
+
+async function runScript(script, args) {
+  try {
+    const { stdout } = await run(process.execPath, [path.join(PROJECT_DIR, 'scripts', script), ...args], {
+      cwd: PROJECT_DIR,
+      timeout: 150_000, // includes time to click Allow on the macOS Keychain prompt
+    });
+    return { ok: true, message: stdout.trim().split('\n')[0] };
+  } catch (e) {
+    if (e.killed) return { ok: false, message: 'timed out (did you click Allow on the Keychain prompt?)' };
+    const line = (e.stderr || e.stdout || e.message || '').toString().trim().split('\n')[0];
+    return { ok: false, message: line.replace(/^Error:\s*/, '') };
+  }
+}
+
+async function saveToVault(id) {
+  if (vaulting) throw httpError(409, 'A Vault save is already in progress');
+  vaulting = true;
+  try {
+    const desktop = await runScript('desktop-vault.mjs', ['push', id]); // may show the Keychain prompt
+    const browser = await runScript('vault.mjs', ['push', id]);
+    return { desktop, browser };
+  } finally {
+    vaulting = false;
+  }
+}
+
 // -------------------------------------------------------------------- API
 
 const app = express();
@@ -422,6 +456,7 @@ app.post('/api/desktop/switch/:name', async (req, res) => {
   if (!/^[\w-]+$/.test(req.params.name)) throw httpError(404, 'Invalid account name');
   res.json(await switchDesktop(req.params.name));
 });
+app.post('/api/accounts/:id/vault', async (req, res) => res.json(await saveToVault(req.params.id)));
 app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
 app.post('/api/accounts/:id/reset', async (req, res) => res.json(await resetProfile(req.params.id)));
 

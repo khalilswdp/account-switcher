@@ -71,6 +71,9 @@ async function call(id, action, label) {
       log(`[${id}] ${state}: "${body.title}" (${body.cookies} cookies, ${body.url})`, body.loggedIn === false);
     } else if (action === 'cli') {
       log(`[${id}] Terminal opened with Claude Code (${body.command})`);
+    } else if (action === 'vault') {
+      log(`[${id}] Desktop app: ${body.desktop.message}`, !body.desktop.ok);
+      log(`[${id}] Browser session: ${body.browser.message}`, !body.browser.ok);
     } else if (action === 'save') {
       log(`[${id}] Session saved`);
     } else {
@@ -112,7 +115,15 @@ function card(a) {
   } else {
     btn('Login / Sync Session', 'bg-violet-600 text-white hover:bg-violet-500', 'login', 'Login window opened', a.status === 'busy');
     btn('Open Claude Code', 'bg-zinc-800 text-white hover:bg-zinc-700 dark:bg-zinc-200 dark:text-zinc-900 dark:hover:bg-zinc-300', 'cli', 'Terminal opened');
-    btn('Run test task', OUTLINE, 'task', 'Task', !['ready', 'login_required'].includes(a.status));
+    btn(
+      'Save to Vault',
+      OUTLINE,
+      'vault',
+      'Saved to Vault',
+      a.status === 'busy',
+      `Save the minimum login data for "${a.label}" to the Vault?\n\nThis sends the desktop login cookie, and the browser session if there is one, to your local Vault. macOS will ask to allow Keychain access: click Allow.`,
+    );
+    btn('Run test task', 'text-xs text-zinc-500 hover:text-zinc-300', 'task', 'Task', !['ready', 'login_required'].includes(a.status));
     btn(
       'Reset profile',
       'text-xs text-zinc-500 hover:text-rose-500',
