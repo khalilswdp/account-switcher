@@ -115,7 +115,7 @@ function card(a) {
     btn('Run test task', OUTLINE, 'task', 'Task', !['ready', 'login_required'].includes(a.status));
     btn(
       'Reset profile',
-      'border border-rose-300 text-xs text-rose-600 hover:bg-rose-50 dark:border-rose-800 dark:text-rose-400 dark:hover:bg-rose-950',
+      'text-xs text-zinc-500 hover:text-rose-500',
       'reset',
       'Profile reset',
       a.status === 'busy',
@@ -160,14 +160,34 @@ function renderDesktop() {
   }
   info.textContent = `Active: ${nameOf(desktop.active)}  |  App: ${desktop.running ? 'running' : 'not running'}`;
 
+  // Real accounts (from accounts.json) get a button; any other parked folder (experiments,
+  // test copies) goes into one dropdown so the panel stays short.
+  const known = new Set(accounts.map((a) => a.id));
+  const mine = desktop.parked.filter((n) => known.has(n));
+  const other = desktop.parked.filter((n) => !known.has(n));
+  const locked = desktopBusy || desktop.switching;
+
   if (!desktop.parked.length) {
     actions.append(h('span', 'text-xs text-zinc-500', 'No other desktop account yet. Create one with: ./scripts/desktop-swap.sh new <name>'));
   }
-  for (const name of desktop.parked) {
+  for (const name of mine) {
     const b = h('button', `${BTN} bg-violet-600 text-white hover:bg-violet-500`, `Switch to ${nameOf(name)}`);
-    b.disabled = desktopBusy || desktop.switching;
+    b.disabled = locked;
     b.addEventListener('click', () => switchDesktop(name));
     actions.append(b);
+  }
+  if (other.length) {
+    const box = h('details', 'mt-1 w-full text-xs text-zinc-500');
+    box.append(h('summary', 'cursor-pointer select-none', `Other folders (${other.length})`));
+    const row = h('div', 'mt-2 flex flex-wrap items-center gap-2');
+    const pick = h('select', 'rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700');
+    for (const name of other) pick.append(h('option', 'text-black', name));
+    const go = h('button', `${BTN} ${OUTLINE}`, 'Switch');
+    go.disabled = locked;
+    go.addEventListener('click', () => switchDesktop(pick.value));
+    row.append(pick, go);
+    box.append(row);
+    actions.append(box);
   }
 }
 
@@ -193,9 +213,14 @@ async function switchDesktop(name) {
   }
 }
 
+let desktopKey = '';
 async function refreshDesktop() {
   try {
     desktop = await (await fetch('/api/desktop')).json();
+    // Re-render only when something changed, so an open dropdown is not reset every 5 s.
+    const key = JSON.stringify([desktop, desktopBusy, accounts.map((a) => a.id + a.label)]);
+    if (key === desktopKey) return;
+    desktopKey = key;
     renderDesktop();
   } catch {
     /* server restarting: next poll retries */
