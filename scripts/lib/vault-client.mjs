@@ -14,6 +14,15 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+// Optional settings file in the project folder (gitignored) so the dashboard and every script
+// share settings such as VAULT_ALLOWED_ACCOUNTS without exporting them. Real environment
+// variables win over it.
+try {
+  process.loadEnvFile(new URL('../../.env', import.meta.url));
+} catch {
+  /* no .env: the defaults apply */
+}
+
 export const fail = (msg) => {
   console.error(`Error: ${msg}`);
   process.exit(1);
@@ -43,7 +52,7 @@ const MOUNT = process.env.VAULT_MOUNT || 'secret';
 const PREFIX = (process.env.VAULT_PATH_PREFIX || 'claude-switcher').replace(/^\/+|\/+$/g, '');
 const FILE_DIR = process.env.VAULT_FILE_DIR;
 
-function vaultFetch(id, init) {
+function vaultFetch(id, init, kind = 'data', query = '') {
   const token = process.env.VAULT_TOKEN || LOCAL_TOKEN;
   if (!VAULT_ADDR || !token) fail('set VAULT_ADDR and VAULT_TOKEN, or set up the local Vault: node scripts/vault-local.mjs init');
   const { protocol, hostname } = new URL(VAULT_ADDR);
@@ -51,7 +60,7 @@ function vaultFetch(id, init) {
   if (protocol !== 'https:' && !local && !process.env.VAULT_ALLOW_INSECURE) {
     fail('refusing to send session data to a non-local Vault over plain http. Use https.');
   }
-  return fetch(`${VAULT_ADDR}/v1/${MOUNT}/data/${PREFIX}/${id}`, {
+  return fetch(`${VAULT_ADDR}/v1/${MOUNT}/${kind}/${PREFIX}/${id}${query}`, {
     ...init,
     headers: { 'X-Vault-Token': token, 'Content-Type': 'application/json' },
   }).catch((e) => fail(`cannot reach Vault at ${VAULT_ADDR}: ${e.cause?.code || e.message}`));
@@ -78,6 +87,16 @@ const providers = {
       if (!FILE_DIR) fail('VAULT_FILE_DIR is required for the file provider');
       await writeFile0600(path.join(FILE_DIR, `${id}.json`), text);
     },
+    // Names directly under prefix; folders end with "/".
+    async list(prefix = '') {
+      if (!FILE_DIR) fail('VAULT_FILE_DIR is required for the file provider');
+      try {
+        return (await fs.readdir(path.join(FILE_DIR, prefix), { withFileTypes: true })).map((e) => (e.isDirectory() ? `${e.name}/` : e.name.replace(/\.json$/, '')));
+      } catch (e) {
+        if (e.code === 'ENOENT') return [];
+        throw e;
+      }
+    },
   },
 
   hashicorp: {
@@ -90,6 +109,12 @@ const providers = {
     async write(id, text) {
       const res = await vaultFetch(id, { method: 'POST', body: JSON.stringify({ data: { envelope: text } }) });
       if (!res.ok) throw vaultError(res);
+    },
+    async list(prefix = '') {
+      const res = await vaultFetch(prefix, { method: 'GET' }, 'metadata', '?list=true');
+      if (res.status === 404) return [];
+      if (!res.ok) throw vaultError(res);
+      return (await res.json()).data?.keys ?? [];
     },
   },
 };

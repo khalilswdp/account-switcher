@@ -16,7 +16,6 @@
 //   VAULT_ALLOWED_ACCOUNTS  comma list, default "test"  (accounts this tool may touch)
 // Session values and the token are never printed.
 import fs from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -24,20 +23,11 @@ import { fail, provider, writeFile0600 } from './lib/vault-client.mjs';
 
 const BACKUP_DIR = process.env.BACKUP_DIR || '.backups';
 const PROFILES_DIR = process.env.PROFILES_DIR || '.profiles';
-const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || 'accounts.json';
 const ALLOWED = (process.env.VAULT_ALLOWED_ACCOUNTS || 'test').split(',').map((s) => s.trim()).filter(Boolean);
 
-function accountIds() {
-  try {
-    return JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf8')).map((a) => a.id);
-  } catch (e) {
-    if (e.code === 'ENOENT') return ['main', 'test'];
-    return fail(`cannot read ${ACCOUNTS_FILE}: ${e.message}`);
-  }
-}
-
 function checkAccount(id) {
-  if (!id || !accountIds().includes(id)) fail(`unknown account "${id ?? ''}". Known: ${accountIds().join(', ')}`);
+  // Any valid name: accounts that exist only in the Vault are fine. The allow-list is the gate.
+  if (!/^[\w-]+$/.test(id ?? '')) fail('account name may only use letters, digits, - and _');
   if (!ALLOWED.includes(id)) {
     fail(`"${id}" is not allowed (VAULT_ALLOWED_ACCOUNTS=${ALLOWED.join(',')}). Add it there to opt in.`);
   }
@@ -151,7 +141,7 @@ const [cmd, id, ...rest] = process.argv.slice(2);
 const force = rest.includes('--force');
 try {
   if (cmd === 'status') {
-    for (const a of id ? [id] : ALLOWED.filter((x) => accountIds().includes(x))) await status(a, rest.includes('--json'));
+    for (const a of id ? [id] : ALLOWED) await status(a, rest.includes('--json'));
   } else if (cmd === 'push') await push(id, force);
   else if (cmd === 'pull') await pull(id, force);
   else fail('usage: vault.mjs <status [id] | push <id> | pull <id>> [--force]');

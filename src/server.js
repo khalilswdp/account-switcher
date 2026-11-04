@@ -8,6 +8,13 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
+// Optional settings file in the project folder (gitignored); real environment variables win.
+try {
+  process.loadEnvFile(new URL('../.env', import.meta.url));
+} catch {
+  /* no .env: the defaults apply */
+}
+
 const run = promisify(execFile);
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -22,31 +29,46 @@ const MARKER = '.synced'; // written once a login window has been saved/closed
 // One persistent Chromium profile per account. The profile folder IS the session:
 // cookies, localStorage, IndexedDB and refreshed tokens live there natively, so
 // switching accounts means opening the other folder. Nothing is copied or replayed.
+// Accounts added from the Vault (not in accounts.json) are remembered here; gitignored.
+const LOCAL_ACCOUNTS_FILE = process.env.LOCAL_ACCOUNTS_FILE || '.accounts.local.json';
+
+function makeAccount(id, label, cliConfigDir) {
+  if (!/^[\w-]+$/.test(id ?? '') || id === '__proto__') throw new Error(`Invalid account id: ${id}`);
+  if (cliConfigDir != null && !/^(~\/|\/)[\w./-]+$/.test(cliConfigDir)) {
+    throw new Error(`Invalid cliConfigDir for ${id}: use an absolute or ~/ path without spaces or quotes`);
+  }
+  return {
+    label: label || id,
+    // Claude Code config folder: "main" uses the default (~/.claude), every other account uses
+    // ~/.claude-<name>, unless accounts.json names a folder.
+    cliConfigDir: cliConfigDir ?? (id === 'main' ? null : `~/.claude-${id}`),
+    profileDir: path.join(PROFILES_DIR, id),
+    backupFile: path.join(BACKUP_DIR, `${id}.json`),
+    legacyState: path.join(LEGACY_DIR, `${id}_account.json`),
+  };
+}
+
+function readList(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw new Error(`Cannot read ${file}: ${e.message}`);
+  }
+}
+
 function loadAccounts() {
-  let list = [
+  const base = readList(ACCOUNTS_FILE) ?? [
     { id: 'main', label: 'Account 1: Main Claude session' },
     { id: 'test', label: 'Account 2: Empty test account' },
   ];
-  try {
-    list = JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf8'));
-  } catch (e) {
-    if (e.code !== 'ENOENT') throw new Error(`Cannot read ${ACCOUNTS_FILE}: ${e.message}`);
-  }
   const out = Object.create(null);
-  for (const { id, label, cliConfigDir } of list) {
-    if (!/^[\w-]+$/.test(id ?? '') || id === '__proto__') throw new Error(`Invalid account id: ${id}`);
+  for (const { id, label, cliConfigDir } of base) {
     if (out[id]) throw new Error(`Duplicate account id: ${id}`);
-    // Claude Code config folder for this account; omit it to use the default (~/.claude).
-    if (cliConfigDir != null && !/^(~\/|\/)[\w./-]+$/.test(cliConfigDir)) {
-      throw new Error(`Invalid cliConfigDir for ${id}: use an absolute or ~/ path without spaces or quotes`);
-    }
-    out[id] = {
-      label: label || id,
-      cliConfigDir: cliConfigDir || null,
-      profileDir: path.join(PROFILES_DIR, id),
-      backupFile: path.join(BACKUP_DIR, `${id}.json`),
-      legacyState: path.join(LEGACY_DIR, `${id}_account.json`),
-    };
+    out[id] = makeAccount(id, label, cliConfigDir);
+  }
+  for (const { id, label } of readList(LOCAL_ACCOUNTS_FILE) ?? []) {
+    if (!out[id]) out[id] = makeAccount(id, label);
   }
   if (!Object.keys(out).length) throw new Error(`${ACCOUNTS_FILE} defines no accounts`);
   return out;
@@ -54,9 +76,19 @@ function loadAccounts() {
 const ACCOUNTS = loadAccounts();
 
 // mode: idle | busy (task running) | login (headed window open)
-const runtime = Object.fromEntries(
-  Object.keys(ACCOUNTS).map((id) => [id, { mode: 'idle', visual: null, lastResult: null, loggedOut: false }]),
-);
+const newRuntime = () => ({ mode: 'idle', visual: null, lastResult: null, loggedOut: false });
+const runtime = Object.fromEntries(Object.keys(ACCOUNTS).map((id) => [id, newRuntime()]));
+
+// Makes an account that exists in the Vault but not on this Mac a local one, so its card,
+// profile and folders can be created. Remembered in the local accounts file.
+async function registerAccount(id) {
+  if (ACCOUNTS[id]) return;
+  ACCOUNTS[id] = makeAccount(id, `Account: ${id}`);
+  runtime[id] = newRuntime();
+  const list = readList(LOCAL_ACCOUNTS_FILE) ?? [];
+  list.push({ id, label: ACCOUNTS[id].label });
+  await fs.writeFile(LOCAL_ACCOUNTS_FILE, `${JSON.stringify(list, null, 2)}\n`, { mode: 0o600 });
+}
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
 const markerFile = (id) => path.join(ACCOUNTS[id].profileDir, MARKER);
@@ -573,16 +605,42 @@ app.post('/api/accounts/:id/vault', async (req, res) => {
   }
   res.json(await saveToVault(req.params.id, wanted));
 });
-app.post('/api/accounts/:id/vault/load', async (req, res) => {
-  const load = LOADERS[String(req.query.part)];
+async function loadPart(id, part) {
+  const load = LOADERS[part];
   if (!load) throw httpError(400, `part must be one of ${Object.keys(LOADERS).join(', ')}`);
   if (vaulting) throw httpError(409, 'A Vault save or load is already in progress');
   vaulting = true;
   try {
-    res.json(await load(req.params.id));
+    return await load(id);
   } finally {
     vaulting = false;
   }
+}
+
+app.post('/api/accounts/:id/vault/load', async (req, res) => res.json(await loadPart(req.params.id, String(req.query.part))));
+
+// Which accounts exist in the Vault, and which parts of each (names and times only).
+async function vaultAccounts() {
+  const r = await runScript('vault-list.mjs', []);
+  if (!r.ok) throw httpError(502, r.message);
+  const { accounts } = JSON.parse(r.message);
+  for (const [id, a] of Object.entries(accounts)) a.local = Boolean(ACCOUNTS[id]);
+  return { accounts };
+}
+app.get('/api/vault/accounts', async (req, res) => res.json(await vaultAccounts()));
+
+// Load a part of an account that is picked from the Vault. If it is not an account on this Mac
+// yet, it becomes one first (its folders and profile are created by the load itself).
+app.post('/api/vault/load', async (req, res) => {
+  const id = String(req.query.account ?? '');
+  const part = String(req.query.part ?? '');
+  if (!/^[\w-]+$/.test(id)) throw httpError(400, 'invalid account name');
+  if (!LOADERS[part]) throw httpError(400, `part must be one of ${Object.keys(LOADERS).join(', ')}`);
+  const entry = (await vaultAccounts()).accounts[id];
+  if (!entry?.[part]) throw httpError(404, `"${id}" has no ${part} entry in the Vault`);
+  if (!entry.allowed) throw httpError(403, `"${id}" is not enabled on this machine (VAULT_ALLOWED_ACCOUNTS)`);
+  await registerAccount(id);
+  res.json({ ...(await loadPart(id, part)), account: id });
 });
 app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
 app.post('/api/accounts/:id/reset', async (req, res) => res.json(await resetProfile(req.params.id)));

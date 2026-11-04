@@ -6,6 +6,7 @@
 //                                              secret/ store, a limited policy and a token
 //   node scripts/vault-local.mjs unseal        needed after every container restart or reboot
 //   node scripts/vault-local.mjs token         issue a fresh limited token (they last 1 year)
+//   node scripts/vault-local.mjs policy        re-apply the limited policy (read, write, list under claude-switcher)
 //   node scripts/vault-local.mjs status
 //   node scripts/vault-local.mjs backup <file> save a snapshot of everything (new-laptop move)
 //   node scripts/vault-local.mjs restore <file>  load a snapshot into a freshly initialised Vault
@@ -33,6 +34,13 @@ const KEYS = path.join(LOCAL_DIR, 'keys.json');
 const TOKEN_FILE = path.join(LOCAL_DIR, 'token');
 const COMPOSE_FILE = fileURLToPath(new URL('../vault/docker-compose.yml', import.meta.url));
 const POLICY = 'claude-switcher';
+// What the helper's limited token may do: read and write entries under claude-switcher, and list
+// them (so the dashboard can show which accounts exist). Nothing else in the Vault.
+const POLICY_RULES = [
+  'path "secret/data/claude-switcher/*" { capabilities = ["create", "read", "update"] }',
+  'path "secret/metadata/claude-switcher" { capabilities = ["list"] }',
+  'path "secret/metadata/claude-switcher/*" { capabilities = ["list", "read"] }',
+].join('\n');
 
 const fail = (msg) => {
   console.error(`Error: ${msg}`);
@@ -163,13 +171,7 @@ const commands = {
     const mount = await api('POST', 'sys/mounts/secret', { token: root, json: { type: 'kv', options: { version: '2' } } });
     if (!mount.ok && mount.status !== 400) fail(`creating the secret/ store failed (HTTP ${mount.status})`);
     await limitHistory(root, KEEP_VERSIONS);
-    await ok(
-      await api('PUT', `sys/policies/acl/${POLICY}`, {
-        token: root,
-        json: { policy: 'path "secret/data/claude-switcher/*" { capabilities = ["create", "read", "update"] }' },
-      }),
-      'policy creation',
-    );
+    await ok(await api('PUT', `sys/policies/acl/${POLICY}`, { token: root, json: { policy: POLICY_RULES } }), 'policy creation');
     await createScopedToken(root);
     console.log('Vault initialised and unsealed.');
     console.log(`  Keys (unseal key + root token): ${KEYS}`);
@@ -191,6 +193,14 @@ const commands = {
     if (!h.initialized || h.sealed) fail('Vault must be initialised and unsealed first.');
     await createScopedToken(readKeys().root_token);
     console.log(`New limited token written to ${TOKEN_FILE} (valid for 1 year).`);
+  },
+
+  // Re-apply the limited policy to an existing Vault. Tokens already issued pick it up at once.
+  async policy() {
+    const h = await health();
+    if (!h.initialized || h.sealed) fail('Vault must be initialised and unsealed first.');
+    await ok(await api('PUT', `sys/policies/acl/${POLICY}`, { token: readKeys().root_token, json: { policy: POLICY_RULES } }), 'policy update');
+    console.log(`Policy "${POLICY}" updated: read, write and list under claude-switcher only.`);
   },
 
   async status() {

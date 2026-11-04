@@ -51,8 +51,9 @@ function configDirOf(name) {
     /* no accounts.json: fall back to the defaults below */
   }
   const a = list.find((x) => x.id === name);
-  if (!a && !['main', 'test'].includes(name)) fail(`unknown account "${name}"`);
-  const dir = a?.cliConfigDir ?? (name === 'test' ? '~/.claude-test' : null);
+  // "main" uses the default config folder (~/.claude); every other account uses ~/.claude-<name>,
+  // unless accounts.json names a folder.
+  const dir = a?.cliConfigDir ?? (name === 'main' ? null : `~/.claude-${name}`);
   return dir ? path.resolve(expand(dir)) : path.join(os.homedir(), '.claude');
 }
 

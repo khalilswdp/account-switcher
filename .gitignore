@@ -2,3 +2,5 @@ node_modules/
 .state/
 .profiles/
 .backups/
+.env
+.accounts.local.json
