@@ -96,8 +96,13 @@ optional `{label}`), after which its card's Load buttons bring the logins over. 
 in `.accounts.local.json`. A new account must be added to `VAULT_ALLOWED_ACCOUNTS` in `.env` before its
 Vault buttons work (the card says so). "Remove from this Mac" on a card forgets the account
 (`DELETE /api/accounts/:id`), in whichever file listed it, and deletes none of its data: app folder,
-Claude Code folder, Keychain login and Vault entries all stay, so it can be added back. It is refused
-while the Claude app is on that account. With no accounts at all the page shows an empty state.
+Claude Code folder, Keychain login and Vault entries all stay, so it can be added back. Its dialog says
+exactly what the account has (on this Mac: app data, Claude Code folder, Keychain login, from
+`onThisMac` in `/api/state` plus the Vault status; in the Vault: which logins, saved when) and is a
+light one-liner when there is nothing anywhere. It is refused while the Claude app is on that account.
+With no accounts at all the page shows an empty state. When a surface has nothing on this Mac but the
+Vault has its login, that row says so and "Load from Vault" becomes its primary button; the strip says
+how many Vault accounts are not on this Mac yet.
 
 **Vault layout.** KV v2 mount `secret/`, entries under `claude-switcher/`: `desktop/<name>` and
 `cli/<name>`. Each value is one JSON "envelope". History is capped at 2 versions (`trim`). The helper

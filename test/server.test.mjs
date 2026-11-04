@@ -105,6 +105,7 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.accounts.map((a) => a.id), ['a', 'b', 'c']);
   assert.equal(r.body.accounts[0].cliConfigDir, '~/.claude-a');
+  assert.deepEqual(r.body.accounts[0].onThisMac, { appData: false, cliFolder: false }); // not assigned yet
   assert.equal(r.body.desktop.supported, true);
   assert.equal(r.body.desktop.active, null);
   assert.ok(r.headers.get('x-dashboard-build'));
@@ -161,6 +162,13 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   assert.equal(r.body.desktop.active, 'a');
   assert.deepEqual(r.body.desktop.parked, ['b']);
   assert.equal(r.body.desktop.running, true);
+  await fs.mkdir(path.join(s.dir, 'claude-b'));
+  r = await s.call('/api/state');
+  assert.deepEqual(r.body.accounts.map((x) => [x.id, x.onThisMac]), [
+    ['a', { appData: true, cliFolder: false }], // active
+    ['b', { appData: true, cliFolder: true }], // parked, with a Claude Code folder
+    ['c', { appData: false, cliFolder: false }],
+  ]);
   r = await s.post('/api/desktop/switch/a');
   assert.equal(r.body.note, 'already active');
   r = await s.post('/api/desktop/new/b');

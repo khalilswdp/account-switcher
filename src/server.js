@@ -76,6 +76,8 @@ async function registerAccount(id, label = '') {
 }
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
+const expandHome = (p) => (p === '~' ? os.homedir() : p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
+const exists = (p) => fs.access(p).then(() => true, () => false);
 
 // Forgets an account on this Mac: its card goes, in whichever file listed it. Nothing of its data is
 // deleted (app data folder, Claude Code folder, Keychain login, Vault entries), so it can be added
@@ -402,8 +404,7 @@ async function pickPath(kind) {
 async function listBackups(folder, account = null) {
   if (!folder.trim()) throw httpError(400, 'choose a folder');
   if (account !== null && !/^[\w-]+$/.test(account)) throw httpError(400, 'invalid account name');
-  const f = folder.trim();
-  const dir = f === '~' ? os.homedir() : f.startsWith('~/') ? path.join(os.homedir(), f.slice(2)) : path.resolve(f);
+  const dir = path.resolve(expandHome(folder.trim()));
   let names;
   try {
     names = await fs.readdir(dir);
@@ -463,10 +464,26 @@ app.param('id', (req, res, next, id) =>
   Object.hasOwn(ACCOUNTS, id) ? next() : res.status(404).json({ error: `Unknown account ${id}` }),
 );
 
-const accountList = () => Object.entries(ACCOUNTS).map(([id, a]) => ({ id, label: a.label, cliConfigDir: a.cliConfigDir }));
-app.get('/api/accounts', (req, res) => res.json(accountList()));
+// Each account with what it has on this Mac that the page cannot see otherwise: app data (the active
+// or a parked folder) and a Claude Code folder. The Keychain login and the Vault entries come with
+// the per-account Vault status.
+async function accountList(desktop = null) {
+  return Promise.all(Object.entries(ACCOUNTS).map(async ([id, a]) => ({
+    id,
+    label: a.label,
+    cliConfigDir: a.cliConfigDir,
+    onThisMac: {
+      appData: Boolean(desktop?.supported && (desktop.active === id || desktop.parked.includes(id))),
+      cliFolder: await exists(expandHome(a.cliConfigDir ?? '~/.claude')),
+    },
+  })));
+}
+app.get('/api/accounts', async (req, res) => res.json(await accountList(await desktopState())));
 // Everything the page polls, in one answer.
-app.get('/api/state', async (req, res) => res.json({ build: BUILD, accounts: accountList(), desktop: { ...(await desktopState()), switching } }));
+app.get('/api/state', async (req, res) => {
+  const desktop = await desktopState();
+  res.json({ build: BUILD, accounts: await accountList(desktop), desktop: { ...desktop, switching } });
+});
 
 // A new account made on the page. Nothing is signed in yet; the card's rows take it from there.
 app.post('/api/accounts', express.json({ limit: '4kb' }), async (req, res) => {

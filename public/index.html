@@ -132,6 +132,7 @@
 
   <section id="vault-only" class="panel" hidden>
     <h2>In the Vault, not on this Mac yet</h2>
+    <p class="muted">"Add to this Mac" gives the account a card here. Its "Load from Vault" buttons then bring each login onto this Mac.</p>
     <div id="vault-only-list"></div>
   </section>
 
@@ -348,8 +349,10 @@ function renderOverview() {
   else if (d) items.push(['Claude app', 'not set up yet', 'warn']);
   if (vaultList?.error) items.push(['Vault', vaultList.error, 'warn']);
   else if (vaultList) {
-    const n = Object.keys(vaultList.accounts).length;
-    items.push(['Vault', n ? `${n} account${n > 1 ? 's' : ''} saved` : 'empty so far', '']);
+    const all = Object.values(vaultList.accounts);
+    const away = all.filter((e) => !e.local).length;
+    const where = away ? `${away} not on this Mac yet (listed below)` : 'all on this Mac';
+    items.push(['Vault', all.length ? `${all.length} account${all.length > 1 ? 's' : ''} saved, ${where}` : 'empty so far', '']);
   }
   $('#overview').replaceChildren(...items.map(([k, v, cls]) => {
     const s = h('span');
@@ -372,8 +375,8 @@ function renderVaultOnly() {
   if (!list.length) return;
   $('#vault-only-list').replaceChildren(...list.map(([id, e]) => {
     const row = h('div', 'vault-only-row');
-    const saved = PARTS.filter(([p]) => e[p]).map(([, name]) => name).join(', ') || 'nothing';
-    row.append(h('span', 'name', id), h('span', 'muted', `saved: ${saved}`));
+    const saved = PARTS.map(([p, name]) => `${name}: ${e[p] ? `saved ${when(e[p].pushedAt)}${e[p].host ? ` on ${e[p].host}` : ''}` : 'not saved'}`).join(' · ');
+    row.append(h('span', 'name', id), h('span', 'muted', saved));
     row.append(button('Add to this Mac', 'btn btn-outline btn-sm', () => openAccountDialog(id), { disabled: !e.allowed }));
     if (!e.allowed) row.append(h('span', 'muted', 'not enabled on this Mac (VAULT_ALLOWED_ACCOUNTS in .env)'));
     return row;
@@ -421,7 +424,8 @@ function surface(name, stateText, cls, actions, extra = []) {
   return s;
 }
 
-function vaultLine(a, part) {
+// suggestLoad: this surface has nothing on this Mac, so a Vault copy is the obvious next step.
+function vaultLine(a, part, suggestLoad = false) {
   const vi = vaultInfo[a.id];
   const p = vi?.[part];
   let text = 'Vault: checking…';
@@ -441,7 +445,7 @@ function vaultLine(a, part) {
   line.append(
     h('span', '', text),
     button('Save to Vault', 'btn btn-quiet btn-sm', () => saveToVault(a, part), { disabled: locked || !canSave }),
-    button('Load from Vault', 'btn btn-quiet btn-sm', () => loadFromVault(a, part), {
+    button('Load from Vault', suggestLoad && canLoad ? 'btn btn-primary btn-sm' : 'btn btn-quiet btn-sm', () => loadFromVault(a, part), {
       disabled: locked || !canLoad,
       title: canLoad ? '' : 'Nothing saved in the Vault for this part yet',
     }),
@@ -466,14 +470,15 @@ function desktopSurface(a) {
       cls = '';
       actions.push(button('Switch the app to this', 'btn btn-primary', () => switchDesktop(a), { disabled: locked }));
     } else {
-      text = 'no app data on this Mac yet';
+      const saved = vaultInfo[a.id]?.desktop?.vault;
+      text = saved ? `no app data on this Mac yet; the Vault has its login (saved ${when(saved.pushedAt)})` : 'no app data on this Mac yet';
       actions.push(button('Sign in via the app…', 'btn btn-outline', () => newDesktop(a), {
         disabled: locked,
         title: 'Reopens the Claude app signed out, so you can sign in as this account',
       }));
     }
   }
-  return surface('Claude app', text, cls, actions, [vaultLine(a, 'desktop')]);
+  return surface('Claude app', text, cls, actions, [vaultLine(a, 'desktop', d?.supported && d.active && !a.onThisMac?.appData)]);
 }
 
 function cliSurface(a) {
@@ -485,12 +490,12 @@ function cliSurface(a) {
     text = `login on this Mac${t ? `, last changed ${when(t)}` : ''}`;
     cls = 'ok';
   } else if (c?.local?.present === false) {
-    text = 'no login on this Mac yet: Terminal will offer /login';
+    text = c.vault ? `no login on this Mac yet; the Vault has one (saved ${when(c.vault.pushedAt)})` : 'no login on this Mac yet: Terminal will offer /login';
   } else if (c) {
     text = 'Terminal asks you to sign in (/login) if needed';
   }
   const actions = [button('Open in Terminal', 'btn btn-outline', () => openCli(a), { disabled: Boolean(busy[a.id]) })];
-  return surface('Claude Code (CLI)', text, cls, actions, [vaultLine(a, 'cli')]);
+  return surface('Claude Code (CLI)', text, cls, actions, [vaultLine(a, 'cli', c?.local?.present === false)]);
 }
 
 // ------------------------------------------------------------------- actions
@@ -628,15 +633,24 @@ async function openCli(a) {
 // Forgets the account on this Mac: the card goes, nothing of its data does. Added back any time.
 async function removeAccount(a) {
   const vi = vaultInfo[a.id];
-  const keeps = [];
-  if (state.desktop?.parked?.includes(a.id)) keeps.push('its Claude app data (parked)');
-  if (vi?.cli?.local?.present) keeps.push('its Claude Code login in the Keychain');
-  if (vi?.desktop?.vault || vi?.cli?.vault) keeps.push('its entries in the Vault');
-  const lines = [
-    `Only the card goes. Nothing is deleted: ${keeps.length ? `${keeps.join(', ')} and any Claude Code folder stay where they are.` : 'any folder, login or Vault entry it has stays where it is.'}`,
-    'You can add it back any time with "Add an account…" (same short name) or from the Vault.',
-  ];
-  if (!(await ask({ title: `Remove "${a.label}" from this Mac?`, lines, ok: 'Remove the card', danger: true }))) return;
+  // What the account has: on this Mac (from the server and the Keychain check), and in the Vault.
+  const here = [];
+  if (a.onThisMac?.appData) here.push("the Claude app's data folder");
+  if (a.onThisMac?.cliFolder) here.push(`the Claude Code folder ${a.cliConfigDir ?? '~/.claude'}`);
+  if (vi?.cli?.local?.present) here.push('a Claude Code login in the Keychain');
+  const inVault = [];
+  if (vi?.desktop?.vault) inVault.push(`Claude app (saved ${when(vi.desktop.vault.pushedAt)})`);
+  if (vi?.cli?.vault) inVault.push(`Claude Code (saved ${when(vi.cli.vault.pushedAt)})`);
+  const unknown = !vi || [vi.desktop, vi.cli].some((p) => p?.state === 'blocked' && !/not allowed/.test(p.message));
+  const lines = [];
+  if (here.length) lines.push(`!Attention: this account has data on this Mac: ${here.join(', ')}.`);
+  if (inVault.length) lines.push(`!It has logins in the Vault: ${inVault.join(', ')}.`);
+  if (unknown) lines.push('!What the Vault holds for it could not be checked right now.');
+  const heavy = here.length > 0 || inVault.length > 0 || unknown;
+  lines.push(heavy
+    ? 'Removing the card deletes none of that: it only forgets the account here. Add it back any time with "Add an account…" (same short name) or from the Vault.'
+    : 'This account has no data on this Mac and nothing in the Vault, so removing the card is all there is to it.');
+  if (!(await ask({ title: `Remove "${a.label}" from this Mac?`, lines, ok: heavy ? 'Remove the card anyway' : 'Remove', danger: heavy }))) return;
   busy[a.id] = 'Removing the card…';
   render();
   try {
