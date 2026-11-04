@@ -63,8 +63,13 @@ Check that it is valid, and whether the Vault is sealed:
 npm run vault:local -- status
 ```
 
-The Vault's own UI is at http://127.0.0.1:8200/ui: sign in there with the root token from `keys.json`.
-To use another Vault instead, set `VAULT_ADDR` and `VAULT_TOKEN` in `.env`.
+The Vault's own UI is at http://127.0.0.1:8200/ui. Signed in with the helper token, open the `secret/`
+engine, then the `claude-switcher/` folder, then `cli/` or `desktop/`, then the account: the saved login
+is its `envelope` field. Opening `claude-switcher` itself (typed without the trailing slash) says "You do
+not have permission to read this secret", because it is a folder, not a secret. The root token from
+`keys.json` sees everything. A Vault set up before 2026-11-04 needs `npm run vault:local -- policy` once
+for the folder to show at the root. To use another Vault instead, set `VAULT_ADDR` and `VAULT_TOKEN`
+in `.env`.
 
 ## Everyday commands
 

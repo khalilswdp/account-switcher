@@ -148,9 +148,10 @@ primary button; the strip says how many Vault accounts are not on this machine y
 
 **Vault layout.** KV v2 mount `secret/`, entries under `claude-switcher/`: `desktop/<name>` and
 `cli/<name>`. Each value is one JSON "envelope". History is capped at 2 versions (`trim`). The helper
-uses a limited token (policy: read, write, list and delete under `claude-switcher` only; "delete" was
-added on 2026-11-04 for the removal dialog, so an older Vault needs `npm run vault:local -- policy`
-once, otherwise deletions from the page fail with a message saying so). A push does nothing when
+uses a limited token (policy: read, write, list and delete under `claude-switcher`, plus listing the
+names at the mount's root so the Vault UI can browse to the folder; "delete" and the root listing were
+added on 2026-11-04, so an older Vault needs `npm run vault:local -- policy` once, otherwise deletions
+from the page fail with a message saying so and the UI shows nothing at `secret/`). A push does nothing when
 nothing changed (a fingerprint, or the login's modified time for the CLI), so there is no new
 version and no Keychain prompt. A push refuses when the Vault copy changed from another machine since
 this one last synced; the page then asks whether to replace it and retries with `?force=1`. Each entry

@@ -44,8 +44,10 @@ const COMPOSE_FILE = fileURLToPath(new URL('../vault/docker-compose.yml', import
 const POLICY = 'claude-switcher';
 // What the helper's limited token may do: read and write entries under claude-switcher, list them
 // (so the dashboard can show which accounts exist), and delete one entry with all its versions
-// (the dashboard's "also delete from the Vault"). Nothing else in the Vault.
+// (the dashboard's "also delete from the Vault"). Plus listing the names at the mount's root, which
+// is where the Vault UI starts browsing (folder names only, never contents). Nothing else.
 const POLICY_RULES = [
+  'path "secret/metadata/" { capabilities = ["list"] }',
   'path "secret/data/claude-switcher/*" { capabilities = ["create", "read", "update"] }',
   'path "secret/metadata/claude-switcher" { capabilities = ["list"] }',
   'path "secret/metadata/claude-switcher/*" { capabilities = ["list", "read", "delete"] }',
@@ -221,7 +223,7 @@ const commands = {
     const h = await health();
     if (!h.initialized || h.sealed) fail('Vault must be initialised and unsealed first.');
     await ok(await api('PUT', `sys/policies/acl/${POLICY}`, { token: readKeys().root_token, json: { policy: POLICY_RULES } }), 'policy update');
-    console.log(`Policy "${POLICY}" updated: read, write, list and delete under claude-switcher only.`);
+    console.log(`Policy "${POLICY}" updated: read, write, list and delete under claude-switcher, and listing the names at the root (for the UI).`);
   },
 
   async status() {
