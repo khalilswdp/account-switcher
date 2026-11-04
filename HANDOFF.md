@@ -257,7 +257,11 @@ Hub refused the 2.2.1 pull on this PC (expired Docker login); `init` needed the 
 node after the unseal. The dashboard page renders with the Windows words, `/api/state` and the holdings
 (folder sizes of 9.7 GB app data and 2.5 GB Claude Code folder) answer, and "Open in Terminal" from the
 API started Claude Code as `test` in a new window (which is how `~/.claude-test` came to exist on this
-PC). A server started inside the app refuses desktop actions through the parent-chain check.
+PC). A server started inside the app refuses desktop actions through the parent-chain check. Later that
+evening the user saved `main`'s app login from the page with the app running: the dashboard quit the
+app, the push decrypted the real cookie with the DPAPI key and stored `desktop/main` (item `Cookies`),
+and the app came back through its app id, still tracked as `main`. The Claude Code session running
+inside the app ended with it, as the confirmation warns.
 
 **Reviewed on 2026-11-04** by a separate read of the port, seven findings, all fixed the same day: a desktop
 switch could rename the active folder while a Vault save or a backup was still reading it (now a switch
@@ -276,14 +280,11 @@ reopen), signing in from cookie-only folders, a pull built from the Vault, a CLI
 fresh config folder, and saving `main`'s parts.
 
 **Not verified or not done:**
-- **A real desktop switch on Windows** (quit, rename, reopen through the app id) and a real desktop
-  push/pull: this session ran inside the Claude desktop app, where the server rightly refuses them.
-  Do it once from your own terminal: `npm start`, assign the app's account, add `test`, "Sign in via
-  the app…". The GCM decryption of a real cookie was not checked either (the file is locked while the
-  app runs); the first `Save to Vault` of the Claude app will tell.
-- Whether the Windows app quits cleanly on `taskkill` (window close) or only hides to the tray; the
-  code ends it after 6 s in that case, which is a crash-style exit the app's databases are built to
-  survive.
+- **A real desktop switch on Windows** (rename between two accounts) and a desktop pull or load: the
+  quit, the real cookie decryption and the reopen are verified by the save above, the rename and the
+  load are not. Next: add `test`, "Sign in via the app…", then switch back and forth.
+- Whether the Windows app quit cleanly on the window close or only after the forced end 6 s later:
+  the save above quit it either way; which phase did it was not observed.
 - The Windows file choosers (PowerShell `FolderBrowserDialog` / `OpenFileDialog`, old-style on Windows
   PowerShell 5.1): they construct, but were not clicked through.
 - The port on a real Mac: the Node rewrite of the swap script and the platform module are covered by
