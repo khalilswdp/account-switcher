@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -549,6 +549,47 @@ async function vaultStatus(id) {
   return { desktop, browser, cli };
 }
 
+// ----------------------------------------------------------- Full backup
+
+// scripts/backup.mjs makes one passphrase-encrypted file with the account's logins and the files
+// that cannot be re-downloaded. The passphrase reaches it on stdin only: never an argument, never
+// logged, never in a URL.
+function runWithStdin(script, args, input, timeoutMs) {
+  return new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(PROJECT_DIR, 'scripts', script), ...args], {
+      cwd: PROJECT_DIR,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => p.kill('SIGTERM'), timeoutMs);
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, out, err });
+    });
+    p.stdin.end(input);
+  });
+}
+
+async function backupAccount(id, folder, passphrase) {
+  if (typeof passphrase !== 'string' || passphrase.length < 12) throw httpError(400, 'the passphrase must be at least 12 characters');
+  if (typeof folder !== 'string' || !folder.trim()) throw httpError(400, 'choose a folder for the backup file');
+  if (vaulting) throw httpError(409, 'A Vault save, load or backup is already in progress');
+  vaulting = true; // one at a time: the login reads can show Keychain prompts
+  try {
+    const r = await runWithStdin('backup.mjs', ['backup', id, '--to', folder.trim()], `${passphrase}\n`, 15 * 60_000);
+    if (r.code !== 0) {
+      const line = r.err.split('\n').find((l) => l.startsWith('Error:'));
+      throw httpError(500, line ? line.replace(/^Error:\s*/, '') : 'the backup did not finish (timed out or was stopped)');
+    }
+    return JSON.parse(r.out.trim().split('\n').pop());
+  } finally {
+    vaulting = false;
+  }
+}
+
 // -------------------------------------------------------------------- API
 
 const app = express();
@@ -642,6 +683,9 @@ app.post('/api/vault/load', async (req, res) => {
   await registerAccount(id);
   res.json({ ...(await loadPart(id, part)), account: id });
 });
+app.post('/api/accounts/:id/backup', express.json({ limit: '16kb' }), async (req, res) =>
+  res.json(await backupAccount(req.params.id, req.body?.folder, req.body?.passphrase)),
+);
 app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
 app.post('/api/accounts/:id/reset', async (req, res) => res.json(await resetProfile(req.params.id)));
 

@@ -42,6 +42,34 @@
     <div id="log" class="mt-2 h-48 overflow-y-auto rounded-lg bg-black p-3 font-mono text-xs leading-5 text-zinc-300"></div>
   </main>
 
+<dialog id="backup-dialog" class="w-[min(30rem,92vw)] rounded-lg border border-zinc-300 bg-white p-5 text-zinc-900 backdrop:bg-black/60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100">
+  <form id="backup-form" class="space-y-3">
+    <h2 class="text-sm font-semibold">Back up <span id="backup-name"></span></h2>
+    <p class="text-xs text-zinc-500">
+      One encrypted file with the account's three logins and what cannot be re-downloaded: Claude Code history,
+      settings, skills and plugins, and the desktop app's data. <strong>Without the passphrase the file cannot be
+      opened, and there is no way to recover it.</strong> Store the file somewhere other than this Mac's disk.
+    </p>
+    <label class="block text-xs">Folder to save it in
+      <input id="backup-folder" autocomplete="off" placeholder="~/Documents/Claude-backups"
+        class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
+    </label>
+    <label class="block text-xs">Passphrase (at least 12 characters)
+      <input id="backup-pass" type="password" autocomplete="new-password"
+        class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
+    </label>
+    <label class="block text-xs">Repeat the passphrase
+      <input id="backup-pass2" type="password" autocomplete="new-password"
+        class="mt-1 w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" />
+    </label>
+    <p id="backup-error" class="min-h-4 text-xs text-rose-500"></p>
+    <div class="flex justify-end gap-2">
+      <button type="button" id="backup-cancel" class="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800">Cancel</button>
+      <button type="submit" class="rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500">Back up</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 'use strict';
 
@@ -217,6 +245,10 @@ function card(a) {
     btn('Login / Sync Session', 'bg-violet-600 text-white hover:bg-violet-500', 'login', 'Login window opened', a.status === 'busy');
     btn('Open Claude Code', 'bg-zinc-800 text-white hover:bg-zinc-700 dark:bg-zinc-200 dark:text-zinc-900 dark:hover:bg-zinc-300', 'cli', 'Terminal opened');
     btn('Run test task', 'text-xs text-zinc-500 hover:text-zinc-300', 'task', 'Task', !['ready', 'login_required'].includes(a.status));
+    const backupBtn = h('button', `${BTN} text-xs text-zinc-500 hover:text-zinc-300`, 'Back up...');
+    backupBtn.disabled = inFlight.has(a.id) || a.status === 'busy';
+    backupBtn.addEventListener('click', () => openBackup(a));
+    actions.append(backupBtn);
     btn(
       'Reset profile',
       'text-xs text-zinc-500 hover:text-rose-500',
@@ -431,6 +463,72 @@ async function loadFromVault(name, part) {
 }
 
 $('#vault-account').addEventListener('change', renderVaultButtons);
+
+// ------------------------------------------------------------- full backup dialog
+
+const backupDialog = $('#backup-dialog');
+let backupFor = null;
+
+function openBackup(a) {
+  backupFor = a;
+  $('#backup-name').textContent = a.label;
+  $('#backup-pass').value = '';
+  $('#backup-pass2').value = '';
+  $('#backup-error').textContent = '';
+  try {
+    $('#backup-folder').value = localStorage.getItem('backupFolder') || ''; // only the folder is remembered
+  } catch {
+    /* storage unavailable: the field stays empty */
+  }
+  backupDialog.showModal();
+}
+
+$('#backup-cancel').addEventListener('click', () => backupDialog.close());
+
+$('#backup-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const folder = $('#backup-folder').value.trim();
+  const pass = $('#backup-pass').value;
+  const error = $('#backup-error');
+  if (!folder) return void (error.textContent = 'Choose a folder.');
+  if (pass.length < 12) return void (error.textContent = 'The passphrase must be at least 12 characters.');
+  if (pass !== $('#backup-pass2').value) return void (error.textContent = 'The two passphrases are not the same.');
+
+  const a = backupFor;
+  try {
+    localStorage.setItem('backupFolder', folder);
+  } catch {
+    /* ignore */
+  }
+  backupDialog.close();
+  $('#backup-pass').value = '';
+  $('#backup-pass2').value = '';
+  inFlight.add(a.id);
+  render();
+  log(`[${a.id}] Backing up (macOS may ask to allow Keychain access: click Allow). This can take a minute...`);
+  try {
+    const res = await fetch(`/api/accounts/${a.id}/backup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder, passphrase: pass }), // in the body, never in the URL
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(res.status === 404 && body.error === 'Not found'
+        ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
+        : body.error || res.statusText);
+    }
+    log(`[${a.id}] Backup saved: ${body.file} (${(body.bytes / 1048576).toFixed(1)} MB)`);
+    for (const [part, state] of Object.entries(body.logins)) log(`[${a.id}]   ${part} login: ${state}`, state !== 'saved');
+    for (const note of body.notes ?? []) log(`[${a.id}]   note: ${note}`, true);
+    log(`[${a.id}] Keep the passphrase safe: without it the file cannot be opened.`);
+  } catch (err) {
+    log(`[${a.id}] Backup failed: ${err.message}`, true);
+  } finally {
+    inFlight.delete(a.id);
+    refresh();
+  }
+});
 
 refresh();
 refreshDesktop();
