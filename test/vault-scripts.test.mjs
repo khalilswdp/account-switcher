@@ -60,6 +60,18 @@ test('desktop-vault: push stores only the session cookie, decrypted; pull and lo
   assert.deepEqual(all.map((c) => c.name), ['anthropic-consent-preferences', 'sessionKey']);
   const sk = all.find((c) => c.name === 'sessionKey');
   assert.equal(decryptCookie(sk.encrypted_value, sk.host_key, key, 24).toString(), 'sk-ant-sid01-FAKEVALUE');
+
+  // forget: the vault entry goes, the folders stay
+  r = await node('desktop-vault.mjs', ['forget', 'fake'], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /Deleted/);
+  assert.equal(await exists(path.join(dir, 'vault', 'desktop', 'fake.json')), false);
+  assert.equal(await exists(cookies), true);
+  r = await node('desktop-vault.mjs', ['forget', 'fake'], { env });
+  assert.match(r.out, /Nothing in the vault/);
+  r = await node('desktop-vault.mjs', ['forget', 'zzz'], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /Nothing in the vault/);
 });
 
 test('desktop-vault: the allow-list and a Vault changed from elsewhere', async () => {
@@ -67,7 +79,7 @@ test('desktop-vault: the allow-list and a Vault changed from elsewhere', async (
   makeCookieDb(path.join(support, 'Claude', 'Cookies'), safeKey(), [{ host: 'claude.ai', name: 'sessionKey', value: 'v1' }]);
   let r = await node('desktop-vault.mjs', ['push', 'nope'], { env });
   assert.equal(r.code, 1);
-  assert.match(r.err, /not allowed/);
+  assert.match(r.err, /no folder/);
   r = await node('desktop-vault.mjs', ['push', 'fake'], { env });
   assert.equal(r.code, 0, r.err);
 
@@ -117,10 +129,27 @@ test('cli-vault: push reads the Keychain item; pull writes one and never overwri
   assert.match(r.out, /Replaced/);
   r = await node('cli-vault.mjs', ['push', 'zzz'], { env });
   assert.equal(r.code, 1);
-  assert.match(r.err, /not allowed/);
+  assert.match(r.err, /no CLI login found/);
+  r = await node('cli-vault.mjs', ['status', 'zzz', '--json'], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(JSON.parse(r.out), { local: { present: false }, vault: null });
+
+  // forget: the vault entry; forget-keychain: this Mac's item. Each leaves the other alone.
+  r = await node('cli-vault.mjs', ['forget', 'fake'], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /Deleted/);
+  assert.equal(await exists(path.join(dir, 'vault', 'cli', 'fake.json')), false);
+  assert.equal(await stubs.readKeychain(cliService(configDir), env.USER), credential);
+  r = await node('cli-vault.mjs', ['forget-keychain', 'fake'], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /Deleted/);
+  await assert.rejects(stubs.readKeychain(cliService(configDir), env.USER));
+  assert.equal(await stubs.readKeychain(cliService(second), env.USER), credential); // the other folder's item stays
+  r = await node('cli-vault.mjs', ['forget-keychain', 'fake'], { env });
+  assert.match(r.out, /No CLI login/);
 });
 
-test('vault-list: which accounts and parts exist, with the allow-list applied and no values', async () => {
+test('vault-list: which accounts and parts exist, and never a value', async () => {
   const { dir, env } = await world('list');
   const put = (rel, obj) => fs.mkdir(path.dirname(path.join(dir, 'vault', rel)), { recursive: true })
     .then(() => fs.writeFile(path.join(dir, 'vault', rel), JSON.stringify(obj)));
@@ -128,15 +157,20 @@ test('vault-list: which accounts and parts exist, with the allow-list applied an
   await put('cli/other.json', { pushedAt: '2026-01-02T00:00:00.000Z', host: 'mac-b', credential: 'SECRET-CRED' });
   await put('cli/nope.json', { pushedAt: '2026-01-03T00:00:00.000Z', host: 'mac-c', credential: 'SECRET-CRED' });
   await put('stale.json', { pushedAt: '2026-01-04T00:00:00.000Z', host: 'mac-d', state: { cookies: [] } }); // an old browser entry
+  await fs.writeFile(path.join(dir, 'vault', 'desktop', 'broken.json'), 'not json at all'); // written by hand, wrongly
+  await put('cli/nodate.json', { host: 'mac-e' }); // no save time: not an envelope
+  await put('desktop/_tmp.json', { pushedAt: '2026-01-05T00:00:00.000Z' }); // "_" names are skipped silently
   const r = await node('vault-list.mjs', [], { env });
   assert.equal(r.code, 0, r.err);
-  assert.doesNotMatch(r.out, /SECRET|stale/);
+  assert.doesNotMatch(r.out, /SECRET|_tmp/);
   assert.deepEqual(JSON.parse(r.out), {
     accounts: {
-      fake: { desktop: { pushedAt: '2026-01-01T00:00:00.000Z', host: 'mac-a' }, cli: null, allowed: true },
-      other: { desktop: null, cli: { pushedAt: '2026-01-02T00:00:00.000Z', host: 'mac-b' }, allowed: true },
-      nope: { desktop: null, cli: { pushedAt: '2026-01-03T00:00:00.000Z', host: 'mac-c' }, allowed: false },
+      fake: { desktop: { pushedAt: '2026-01-01T00:00:00.000Z', host: 'mac-a' }, cli: null },
+      other: { desktop: null, cli: { pushedAt: '2026-01-02T00:00:00.000Z', host: 'mac-b' } },
+      nope: { desktop: null, cli: { pushedAt: '2026-01-03T00:00:00.000Z', host: 'mac-c' } },
     },
+    unreadable: ['cli/nodate', 'desktop/broken'],
+    ignored: ['stale'],
   });
 });
 

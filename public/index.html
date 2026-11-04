@@ -23,6 +23,7 @@
       }
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; } /* the hidden attribute wins over any display rule below */
     body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
     main { max-width: 58rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
     h1 { font-size: 1.3rem; margin: 0; }
@@ -66,6 +67,8 @@
     .card .id { color: var(--muted); font-size: .75rem; margin-top: .15rem; }
     .chip { font-size: .7rem; font-weight: 600; padding: .2rem .55rem; border-radius: 999px; white-space: nowrap; }
     .chip-ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+    .chip-shield { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+    .protected-note { font-size: .75rem; color: var(--muted); align-self: center; }
     .surface { border-top: 1px solid var(--line); margin-top: .75rem; padding-top: .6rem; }
     .surface-row { display: flex; justify-content: space-between; gap: .5rem .75rem; align-items: center; flex-wrap: wrap; }
     .surface-head { min-width: 0; }
@@ -156,7 +159,8 @@
     <ul>
       <li><b>Claude app</b>: each account has its own app data on this Mac. Switching quits the app, swaps which data it uses, and reopens it. Nothing is copied or deleted.</li>
       <li><b>Claude Code</b>: each account has its own Claude Code folder and login on this Mac. "Open in Terminal" starts Claude Code as that account.</li>
-      <li><b>Vault</b>: "Save to Vault" puts one login in your private Vault; "Load from Vault" brings it onto this Mac. Only the accounts listed in VAULT_ALLOWED_ACCOUNTS (in .env) may use the Vault.</li>
+      <li><b>Vault</b>: "Save to Vault" puts one login in your private Vault; "Load from Vault" brings that same account's login back onto this Mac. No account can load another account's login.</li>
+      <li><b>Protected accounts</b> (PROTECTED_ACCOUNTS in .env, "main" by default): switched to, saved and backed up like any other, but never removed from this Mac, and nothing of theirs can be deleted here.</li>
       <li><b>Backup</b>: one encrypted file with the account's two logins and what cannot be re-downloaded (Claude Code history, settings, the app's data). Restoring only adds what is missing.</li>
     </ul>
   </details>
@@ -169,6 +173,55 @@
     <div class="dialog-actions">
       <button type="submit" value="cancel" class="btn btn-outline">Cancel</button>
       <button type="submit" value="ok" id="confirm-ok" class="btn btn-primary">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="remove-dialog">
+  <form id="remove-form">
+    <h2 id="remove-title"></h2>
+    <div id="remove-summary" class="body"></div>
+    <div id="remove-options" hidden>
+      <p class="warn" style="margin-top: .75rem;"><b>Also delete, permanently:</b></p>
+      <div id="remove-list" class="choices"></div>
+    </div>
+    <label class="field" id="remove-confirm-field" hidden>Type the short name (<span id="remove-id"></span>) to confirm the deletion
+      <span class="control"><input id="remove-confirm" type="text" autocomplete="off" /></span>
+    </label>
+    <label class="field" id="remove-pass-field" hidden>Deletion passphrase
+      <span class="control"><input id="remove-pass" type="password" autocomplete="off" /></span>
+    </label>
+    <p id="remove-error" class="error"></p>
+    <div class="dialog-actions" style="justify-content: space-between;">
+      <span class="row">
+        <button type="button" id="remove-backup" class="btn btn-quiet" hidden>Back up first…</button>
+        <button type="button" id="remove-setpass" class="btn btn-quiet" hidden></button>
+      </span>
+      <span class="row">
+        <button type="button" id="remove-cancel" class="btn btn-outline">Cancel</button>
+        <button type="submit" id="remove-go" class="btn btn-primary">Remove the card</button>
+      </span>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="pass-dialog">
+  <form id="pass-form">
+    <h2 id="pass-title">Require a passphrase for deletions</h2>
+    <p class="muted">Every deletion of data from this page will ask for it. Only a hash is stored, next to the Vault keys. To stop requiring one, delete the file delete-passphrase in ~/.claude-switcher-vault.</p>
+    <label class="field" id="pass-current-field" hidden>Current passphrase
+      <span class="control"><input id="pass-current" type="password" autocomplete="off" /></span>
+    </label>
+    <label class="field">New passphrase (at least 8 characters)
+      <span class="control"><input id="pass-next" type="password" autocomplete="new-password" /></span>
+    </label>
+    <label class="field">Repeat it
+      <span class="control"><input id="pass-next2" type="password" autocomplete="new-password" /></span>
+    </label>
+    <p id="pass-error" class="error"></p>
+    <div class="dialog-actions">
+      <button type="button" id="pass-cancel" class="btn btn-outline">Cancel</button>
+      <button type="submit" class="btn btn-primary">Save</button>
     </div>
   </form>
 </dialog>
@@ -353,6 +406,12 @@ function renderOverview() {
     const away = all.filter((e) => !e.local).length;
     const where = away ? `${away} not on this Mac yet (listed below)` : 'all on this Mac';
     items.push(['Vault', all.length ? `${all.length} account${all.length > 1 ? 's' : ''} saved, ${where}` : 'empty so far', '']);
+    if (vaultList.unreadable?.length) {
+      items.push(['Vault entries that could not be read', `${vaultList.unreadable.join(', ')} (each entry is one field "envelope" holding the JSON the scripts write)`, 'warn']);
+    }
+    if (vaultList.ignored?.length) {
+      items.push(['Old browser entries ignored', `${vaultList.ignored.join(', ')} (remove with: npm run vault:local -- purge <name>)`, 'muted']);
+    }
   }
   $('#overview').replaceChildren(...items.map(([k, v, cls]) => {
     const s = h('span');
@@ -377,8 +436,7 @@ function renderVaultOnly() {
     const row = h('div', 'vault-only-row');
     const saved = PARTS.map(([p, name]) => `${name}: ${e[p] ? `saved ${when(e[p].pushedAt)}${e[p].host ? ` on ${e[p].host}` : ''}` : 'not saved'}`).join(' · ');
     row.append(h('span', 'name', id), h('span', 'muted', saved));
-    row.append(button('Add to this Mac', 'btn btn-outline btn-sm', () => openAccountDialog(id), { disabled: !e.allowed }));
-    if (!e.allowed) row.append(h('span', 'muted', 'not enabled on this Mac (VAULT_ALLOWED_ACCOUNTS in .env)'));
+    row.append(button('Add to this Mac', 'btn btn-outline btn-sm', () => openAccountDialog(id)));
     return row;
   }));
 }
@@ -391,7 +449,14 @@ function card(a) {
   const title = h('div');
   title.append(h('h2', '', a.label), h('div', 'id', `${a.id} · Claude Code folder ${a.cliConfigDir ?? '~/.claude'}`));
   head.append(title);
-  if (state.desktop?.active === a.id) head.append(h('span', 'chip chip-ok', 'Claude app is here'));
+  const chips = h('div', 'row');
+  if (a.protected) {
+    const chip = h('span', 'chip chip-shield', 'Protected');
+    chip.title = 'Switched to, saved and backed up like any other, but never removed from this Mac, and nothing of it can be deleted here (PROTECTED_ACCOUNTS in .env)';
+    chips.append(chip);
+  }
+  if (state.desktop?.active === a.id) chips.append(h('span', 'chip chip-ok', 'Claude app is here'));
+  if (chips.childElementCount) head.append(chips);
   el.append(head, desktopSurface(a), cliSurface(a));
   if (busy[a.id]) {
     const b = h('div', 'busy');
@@ -400,13 +465,15 @@ function card(a) {
   }
   const foot = h('footer');
   const onIt = state.desktop?.active === a.id;
-  foot.append(
-    button('Back up this account…', 'btn btn-quiet', () => openBackup(a), { disabled: Boolean(busy[a.id]) }),
-    button('Remove from this Mac', 'btn btn-quiet btn-danger', () => removeAccount(a), {
+  foot.append(button('Back up this account…', 'btn btn-quiet', () => openBackup(a), { disabled: Boolean(busy[a.id]) }));
+  if (a.protected) {
+    foot.append(h('span', 'protected-note', 'protected: cannot be removed'));
+  } else {
+    foot.append(button('Remove from this Mac', 'btn btn-quiet btn-danger', () => openRemove(a), {
       disabled: Boolean(busy[a.id]) || onIt,
-      title: onIt ? 'The Claude app is on this account: switch it to another one first' : 'Removes the card only; nothing is deleted',
-    }),
-  );
+      title: onIt ? 'The Claude app is on this account: switch it to another one first' : 'Removes the card; what else to delete, if anything, is asked next',
+    }));
+  }
   el.append(foot);
   return el;
 }
@@ -432,7 +499,7 @@ function vaultLine(a, part, suggestLoad = false) {
   let canSave = Boolean(vi);
   let canLoad = false;
   if (p?.state === 'blocked') {
-    text = /not allowed/.test(p.message) ? 'Vault: not enabled for this account (VAULT_ALLOWED_ACCOUNTS in .env)' : `Vault: ${p.message}`;
+    text = `Vault: ${p.message}`;
     canSave = false;
   } else if (p?.vault) {
     text = `Vault: saved ${when(p.vault.pushedAt)}${p.vault.host ? ` on ${p.vault.host}` : ''}`;
@@ -631,40 +698,207 @@ async function openCli(a) {
 }
 
 // Forgets the account on this Mac: the card goes, nothing of its data does. Added back any time.
-async function removeAccount(a) {
-  const vi = vaultInfo[a.id];
-  // What the account has: on this Mac (from the server and the Keychain check), and in the Vault.
-  const here = [];
-  if (a.onThisMac?.appData) here.push("the Claude app's data folder");
-  if (a.onThisMac?.cliFolder) here.push(`the Claude Code folder ${a.cliConfigDir ?? '~/.claude'}`);
-  if (vi?.cli?.local?.present) here.push('a Claude Code login in the Keychain');
-  const inVault = [];
-  if (vi?.desktop?.vault) inVault.push(`Claude app (saved ${when(vi.desktop.vault.pushedAt)})`);
-  if (vi?.cli?.vault) inVault.push(`Claude Code (saved ${when(vi.cli.vault.pushedAt)})`);
-  const unknown = !vi || [vi.desktop, vi.cli].some((p) => p?.state === 'blocked' && !/not allowed/.test(p.message));
-  const lines = [];
-  if (here.length) lines.push(`!Attention: this account has data on this Mac: ${here.join(', ')}.`);
-  if (inVault.length) lines.push(`!It has logins in the Vault: ${inVault.join(', ')}.`);
-  if (unknown) lines.push('!What the Vault holds for it could not be checked right now.');
-  const heavy = here.length > 0 || inVault.length > 0 || unknown;
-  lines.push(heavy
-    ? 'Removing the card deletes none of that: it only forgets the account here. Add it back any time with "Add an account…" (same short name) or from the Vault.'
-    : 'This account has no data on this Mac and nothing in the Vault, so removing the card is all there is to it.');
-  if (!(await ask({ title: `Remove "${a.label}" from this Mac?`, lines, ok: heavy ? 'Remove the card anyway' : 'Remove', danger: heavy }))) return;
-  busy[a.id] = 'Removing the card…';
-  render();
+// ------------------------------------------------------------------- remove an account
+
+// "Remove from this Mac" forgets the card. The dialog lists what the account holds and lets each
+// item be deleted too, permanently, behind the typed short name (and the deletion passphrase, when
+// one is set). Nothing is deleted unless ticked.
+const removeDialog = $('#remove-dialog');
+const passDialog = $('#pass-dialog');
+let removeFor = null; // the account the dialog is about
+let holdings = null; // what it holds, from the server
+const mb = (bytes) => (bytes == null ? 'size unknown' : `${(bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0)} MB`);
+
+async function openRemove(a) {
+  removeFor = a;
+  holdings = null;
+  $('#remove-title').textContent = `Remove "${a.label}" from this Mac`;
+  $('#remove-summary').replaceChildren(h('p', 'muted', 'Looking at what this account holds…'));
+  $('#remove-list').replaceChildren();
+  for (const id of ['remove-options', 'remove-confirm-field', 'remove-pass-field', 'remove-backup', 'remove-setpass']) $(`#${id}`).hidden = true;
+  $('#remove-confirm').value = '';
+  $('#remove-pass').value = '';
+  $('#remove-error').textContent = '';
+  $('#remove-id').textContent = a.id;
+  const go = $('#remove-go');
+  go.textContent = 'Remove the card';
+  go.className = 'btn btn-primary';
+  go.disabled = true;
+  removeDialog.showModal();
+  let folder = '';
   try {
-    await del(`/api/accounts/${a.id}`);
-    log(`[${a.id}] Removed from this Mac. Nothing of its data was deleted.`);
-    delete vaultInfo[a.id];
-  } catch (e) {
-    log(`[${a.id}] Failed: ${e.message}`, true);
-  } finally {
-    delete busy[a.id];
-    await refresh();
-    loadVaultAccounts(); // an account that is in the Vault shows up again as "not on this Mac"
+    folder = localStorage.getItem('backupFolder') || '';
+  } catch {
+    /* no remembered folder */
   }
+  try {
+    const got = await api(`/api/accounts/${a.id}/holdings${folder ? `?backupFolder=${encodeURIComponent(folder)}` : ''}`);
+    if (removeFor !== a) return;
+    holdings = got;
+  } catch (e) {
+    if (removeFor !== a) return;
+    $('#remove-summary').replaceChildren(h('p', 'warn', `Could not look at what the account holds: ${e.message}`));
+    return;
+  }
+  renderRemove();
 }
+
+// The checklist: [key, what it is, where it is].
+function removeItems() {
+  const hd = holdings;
+  const items = [];
+  if (hd.vault.desktop?.vault) items.push(['vaultDesktop', `Claude app login in the Vault (saved ${when(hd.vault.desktop.vault.pushedAt)}), every version`, '']);
+  if (hd.vault.cli?.vault) items.push(['vaultCli', `Claude Code login in the Vault (saved ${when(hd.vault.cli.vault.pushedAt)}), every version`, '']);
+  if (hd.mac.appData) items.push(['appData', `Claude app data folder on this Mac, ${mb(hd.mac.appData.bytes)}`, hd.mac.appData.path]);
+  if (hd.mac.cliFolder) {
+    items.push(['cliFolder', `Claude Code folder on this Mac, ${mb(hd.mac.cliFolder.bytes)}: all its conversation history, settings, skills and plugins`, hd.mac.cliFolder.path]);
+  }
+  if (hd.mac.keychain?.present) items.push(['keychain', "Claude Code login in this Mac's Keychain", '']);
+  if (hd.backups?.files?.length) {
+    const n = hd.backups.files.length;
+    const total = hd.backups.files.reduce((sum, f) => sum + f.bytes, 0);
+    items.push(['backups', `${n} backup file${n > 1 ? 's' : ''} of this account, ${mb(total)}`, `${hd.backups.folder}: ${hd.backups.files.map((f) => f.name).join(', ')}`]);
+  }
+  return items;
+}
+
+function renderRemove() {
+  const hd = holdings;
+  const items = removeItems();
+  const vaultUnknown = [hd.vault.desktop, hd.vault.cli].some((p) => p?.state === 'blocked');
+  const summary = $('#remove-summary');
+  const list = $('#remove-list');
+  list.replaceChildren();
+  if (!items.length && !vaultUnknown) {
+    summary.replaceChildren(h('p', '', 'This account has no data on this Mac and nothing in the Vault, so removing the card is all there is to it.'));
+  } else {
+    summary.replaceChildren(
+      h('p', '', 'Removing the card deletes nothing by itself. Tick below what you also want deleted. There is no undo.'),
+      ...(vaultUnknown ? [h('p', 'warn', 'What the Vault holds for it could not be checked right now.')] : []),
+    );
+    for (const [key, label, where] of items) {
+      const row = h('label');
+      const box = h('input');
+      box.type = 'checkbox';
+      box.value = key;
+      box.addEventListener('change', updateRemoveButtons);
+      const text = h('span', '', label);
+      if (where) text.append(h('div', 'muted', where));
+      row.append(box, text);
+      list.append(row);
+    }
+  }
+  $('#remove-options').hidden = !items.length;
+  $('#remove-backup').hidden = !(hd.mac.cliFolder || hd.mac.appData);
+  const setpass = $('#remove-setpass');
+  setpass.hidden = !items.length;
+  setpass.textContent = hd.passphraseSet ? 'Change the deletion passphrase…' : 'Require a passphrase for deletions…';
+  updateRemoveButtons();
+}
+
+const tickedRemovals = () => [...$('#remove-list').querySelectorAll('input:checked')].map((c) => c.value);
+
+function updateRemoveButtons() {
+  const any = tickedRemovals().length > 0;
+  $('#remove-confirm-field').hidden = !any;
+  $('#remove-pass-field').hidden = !(any && holdings?.passphraseSet);
+  const go = $('#remove-go');
+  go.textContent = any ? 'Delete the ticked items and remove the card' : 'Remove the card';
+  go.className = any ? 'btn btn-danger-solid' : 'btn btn-primary';
+  go.disabled = false;
+}
+
+$('#remove-cancel').addEventListener('click', () => removeDialog.close());
+removeDialog.addEventListener('close', () => {
+  $('#remove-pass').value = ''; // never keep the passphrase around
+  removeFor = null;
+});
+$('#remove-backup').addEventListener('click', () => {
+  const a = removeFor;
+  removeDialog.close();
+  openBackup(a);
+});
+
+$('#remove-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const a = removeFor;
+  const ticked = tickedRemovals();
+  const error = $('#remove-error');
+  const go = $('#remove-go');
+  if (ticked.length) {
+    if ($('#remove-confirm').value.trim() !== a.id) return void (error.textContent = `Type the short name exactly: ${a.id}`);
+    if (holdings.passphraseSet && !$('#remove-pass').value) return void (error.textContent = 'Enter the deletion passphrase.');
+  }
+  error.textContent = '';
+  go.disabled = true;
+  go.textContent = ticked.length ? 'Deleting…' : 'Removing…';
+  try {
+    if (!ticked.length) {
+      await del(`/api/accounts/${a.id}`);
+      log(`[${a.id}] Removed from this Mac. Nothing of its data was deleted.`);
+    } else {
+      const targets = Object.fromEntries(ticked.map((k) => [k, true]));
+      if (targets.backups) targets.backups = holdings.backups.files.map((f) => f.path);
+      const out = await post(`/api/accounts/${a.id}/delete`, {
+        confirm: $('#remove-confirm').value.trim(),
+        passphrase: holdings.passphraseSet ? $('#remove-pass').value : undefined,
+        targets,
+        backupFolder: holdings.backups?.folder,
+      });
+      for (const msg of Object.values(out.done)) log(`[${a.id}] ${msg}`);
+      for (const [key, msg] of Object.entries(out.errors)) log(`[${a.id}] ${key}: not deleted: ${msg}`, true);
+      if (!out.removed) {
+        error.textContent = 'Some items could not be deleted (see the activity log). The card stays, so you can try again.';
+        const folder = holdings.backups?.folder;
+        holdings = await api(`/api/accounts/${a.id}/holdings${folder ? `?backupFolder=${encodeURIComponent(folder)}` : ''}`).catch(() => holdings);
+        renderRemove();
+        return;
+      }
+      log(`[${a.id}] Removed from this Mac.`);
+    }
+    removeDialog.close();
+    delete vaultInfo[a.id];
+  } catch (err) {
+    error.textContent = err.message;
+    updateRemoveButtons();
+    return;
+  }
+  await refresh();
+  loadVaultAccounts();
+});
+
+// The deletion passphrase: set once, changed with the current one.
+$('#remove-setpass').addEventListener('click', () => {
+  const set = Boolean(holdings?.passphraseSet);
+  $('#pass-title').textContent = set ? 'Change the deletion passphrase' : 'Require a passphrase for deletions';
+  $('#pass-current-field').hidden = !set;
+  for (const id of ['pass-current', 'pass-next', 'pass-next2']) $(`#${id}`).value = '';
+  $('#pass-error').textContent = '';
+  passDialog.showModal();
+});
+$('#pass-cancel').addEventListener('click', () => passDialog.close());
+passDialog.addEventListener('close', () => {
+  for (const id of ['pass-current', 'pass-next', 'pass-next2']) $(`#${id}`).value = '';
+});
+$('#pass-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const next = $('#pass-next').value;
+  const error = $('#pass-error');
+  if (next.length < 8) return void (error.textContent = 'At least 8 characters.');
+  if (next !== $('#pass-next2').value) return void (error.textContent = 'The two passphrases are not the same.');
+  try {
+    await post('/api/deletion-passphrase', { current: $('#pass-current').value || undefined, next });
+    passDialog.close();
+    log('Deletions from this page now require the passphrase.');
+    if (holdings) {
+      holdings.passphraseSet = true;
+      $('#remove-setpass').textContent = 'Change the deletion passphrase…';
+      updateRemoveButtons();
+    }
+  } catch (err) {
+    error.textContent = err.message;
+  }
+});
 
 // ------------------------------------------------------------------- add an account
 
@@ -684,7 +918,7 @@ function openAccountDialog(vaultId = null) {
   $('#account-label').value = vaultId ?? '';
   $('#account-note').textContent = vaultId
     ? ''
-    : 'Its Claude Code folder will be ~/.claude-<short name>. To save or load its logins with the Vault, add the short name to VAULT_ALLOWED_ACCOUNTS in .env.';
+    : 'Its Claude Code folder will be ~/.claude-<short name>. To make it a protected account (never removed or deleted from this page), add the short name to PROTECTED_ACCOUNTS in .env.';
   $('#account-error').textContent = '';
   accountDialog.showModal();
   (vaultId ? $('#account-label') : $('#account-id')).focus();

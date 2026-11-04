@@ -34,12 +34,13 @@ const KEYS = path.join(LOCAL_DIR, 'keys.json');
 const TOKEN_FILE = path.join(LOCAL_DIR, 'token');
 const COMPOSE_FILE = fileURLToPath(new URL('../vault/docker-compose.yml', import.meta.url));
 const POLICY = 'claude-switcher';
-// What the helper's limited token may do: read and write entries under claude-switcher, and list
-// them (so the dashboard can show which accounts exist). Nothing else in the Vault.
+// What the helper's limited token may do: read and write entries under claude-switcher, list them
+// (so the dashboard can show which accounts exist), and delete one entry with all its versions
+// (the dashboard's "also delete from the Vault"). Nothing else in the Vault.
 const POLICY_RULES = [
   'path "secret/data/claude-switcher/*" { capabilities = ["create", "read", "update"] }',
   'path "secret/metadata/claude-switcher" { capabilities = ["list"] }',
-  'path "secret/metadata/claude-switcher/*" { capabilities = ["list", "read"] }',
+  'path "secret/metadata/claude-switcher/*" { capabilities = ["list", "read", "delete"] }',
 ].join('\n');
 
 const fail = (msg) => {
@@ -200,7 +201,7 @@ const commands = {
     const h = await health();
     if (!h.initialized || h.sealed) fail('Vault must be initialised and unsealed first.');
     await ok(await api('PUT', `sys/policies/acl/${POLICY}`, { token: readKeys().root_token, json: { policy: POLICY_RULES } }), 'policy update');
-    console.log(`Policy "${POLICY}" updated: read, write and list under claude-switcher only.`);
+    console.log(`Policy "${POLICY}" updated: read, write, list and delete under claude-switcher only.`);
   },
 
   async status() {

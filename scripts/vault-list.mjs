@@ -1,23 +1,24 @@
 #!/usr/bin/env node
 // What accounts exist in the Vault, and which parts of each. Names and save times only,
 // printed as one line of JSON for the dashboard:
-//   { "accounts": { "test": { "desktop": {pushedAt, host}|null, "cli": ..., "allowed": true } } }
+//   { "accounts": { "test": { "desktop": {pushedAt, host}|null, "cli": ... } },
+//     "unreadable": ["desktop/x"],   entries that exist but hold nothing this tool can read
+//     "ignored": ["main"] }          entries outside desktop/ and cli/ (old browser sessions)
 //
-// Entries live at claude-switcher/desktop/<name> and claude-switcher/cli/<name>. Anything else
-// under claude-switcher (such as a browser session left by the dropped browser part) is ignored.
-// Names starting with "_" are ignored too.
-//   VAULT_ALLOWED_ACCOUNTS  comma list, default "test": the accounts this tooling may load or save
+// Entries live at claude-switcher/desktop/<name> and claude-switcher/cli/<name>, each one key
+// "envelope" holding the JSON the scripts write (an entry written by hand as separate fields is
+// accepted too, see lib/vault-client.mjs). Names starting with "_" are skipped silently.
 import { fail, provider } from './lib/vault-client.mjs';
 
-const ALLOWED = (process.env.VAULT_ALLOWED_ACCOUNTS || 'test').split(',').map((s) => s.trim()).filter(Boolean);
 const NAME = /^[\w-]+$/;
 
+// The save time and host of one entry, or null when it cannot be read as an envelope.
 async function info(id) {
   const raw = await provider().read(id);
   if (!raw) return null;
   try {
     const env = JSON.parse(raw);
-    return { pushedAt: env.pushedAt ?? null, host: env.host ?? null };
+    return typeof env.pushedAt === 'string' ? { pushedAt: env.pushedAt, host: env.host ?? null } : null;
   } catch {
     return null;
   }
@@ -25,17 +26,24 @@ async function info(id) {
 
 try {
   const accounts = {};
-  const add = (name, part, value) => {
-    if (!NAME.test(name) || name.startsWith('_') || !value) return;
-    accounts[name] ??= { desktop: null, cli: null, allowed: ALLOWED.includes(name) };
-    accounts[name][part] = value;
-  };
+  const unreadable = [];
+  const ignored = [];
   for (const [prefix, part] of [['desktop/', 'desktop'], ['cli/', 'cli']]) {
     for (const key of await provider().list(prefix)) {
-      if (!key.endsWith('/')) add(key, part, await info(`${prefix}${key}`));
+      if (key.endsWith('/') || !NAME.test(key) || key.startsWith('_')) continue;
+      const value = await info(`${prefix}${key}`);
+      if (!value) {
+        unreadable.push(`${prefix}${key}`);
+        continue;
+      }
+      accounts[key] ??= { desktop: null, cli: null };
+      accounts[key][part] = value;
     }
   }
-  console.log(JSON.stringify({ accounts }));
+  for (const key of await provider().list('')) {
+    if (!key.endsWith('/') && !key.startsWith('_')) ignored.push(key);
+  }
+  console.log(JSON.stringify({ accounts, unreadable: unreadable.sort(), ignored: ignored.sort() }));
 } catch (e) {
   fail(e.message);
 }

@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 // Optional settings file in the project folder (gitignored) so the dashboard and every script
-// share settings such as VAULT_ALLOWED_ACCOUNTS without exporting them. Real environment
+// share settings such as PROTECTED_ACCOUNTS without exporting them. Real environment
 // variables win over it.
 try {
   process.loadEnvFile(new URL('../../.env', import.meta.url));
@@ -97,6 +97,10 @@ const providers = {
         throw e;
       }
     },
+    async delete(id) {
+      if (!FILE_DIR) fail('VAULT_FILE_DIR is required for the file provider');
+      await fs.rm(path.join(FILE_DIR, `${id}.json`), { force: true });
+    },
   },
 
   hashicorp: {
@@ -104,7 +108,11 @@ const providers = {
       const res = await vaultFetch(id, { method: 'GET' });
       if (res.status === 404) return null;
       if (!res.ok) throw vaultError(res);
-      return (await res.json()).data?.data?.envelope ?? null;
+      const data = (await res.json()).data?.data ?? {};
+      if (typeof data.envelope === 'string') return data.envelope;
+      // An entry written by hand in the Vault's own UI, as separate fields instead of one "envelope":
+      // accepted as the same thing.
+      return 'version' in data ? JSON.stringify(data) : null;
     },
     async write(id, text) {
       const res = await vaultFetch(id, { method: 'POST', body: JSON.stringify({ data: { envelope: text } }) });
@@ -115,6 +123,14 @@ const providers = {
       if (res.status === 404) return [];
       if (!res.ok) throw vaultError(res);
       return (await res.json()).data?.keys ?? [];
+    },
+    // Every version of the entry, permanently. Needs "delete" on the metadata path, which the
+    // limited policy grants since 2026-11-04 (re-apply it with: node scripts/vault-local.mjs policy).
+    async delete(id) {
+      const res = await vaultFetch(id, { method: 'DELETE' }, 'metadata');
+      if (res.status === 404) return;
+      if (res.status === 403) throw new Error('Vault refused the deletion: re-apply the helper policy (node scripts/vault-local.mjs policy) so the token may delete');
+      if (!res.ok) throw vaultError(res);
     },
   },
 };

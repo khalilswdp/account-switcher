@@ -82,6 +82,16 @@ if (args[0] === 'find-generic-password') {
   process.stdout.write('keychain: "login"\\nattributes:\\n    "mdat"<timedate>=0x' + Buffer.from(stamp).toString('hex') + '  "' + stamp + '"\\n');
   process.exit(0);
 }
+if (args[0] === 'delete-generic-password') {
+  const s = opt('-s');
+  const a = opt('-a');
+  if (!fs.existsSync(file(s, a))) {
+    process.stderr.write('security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\\n');
+    process.exit(44);
+  }
+  fs.unlinkSync(file(s, a));
+  process.exit(0);
+}
 if (args[0] === '-i') {
   const line = fs.readFileSync(0, 'utf8');
   const m = /add-generic-password -s "([^"]*)" -a "([^"]*)" -X ([0-9a-fA-F]+)( -U)?/.exec(line);
@@ -195,7 +205,6 @@ export async function world(name = 'world') {
     ACCOUNTS_FILE: path.join(dir, 'accounts.json'),
     VAULT_PROVIDER: 'file',
     VAULT_FILE_DIR: path.join(dir, 'vault'),
-    VAULT_ALLOWED_ACCOUNTS: 'fake,other',
   };
   return { dir, env, support, stubs };
 }

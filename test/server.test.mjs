@@ -6,7 +6,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { ROOT, baseEnv, exists, makeStubs, scratch } from './helpers.mjs';
+import { ROOT, baseEnv, cliService, exists, makeStubs, scratch } from './helpers.mjs';
 
 const freePort = () => new Promise((resolve) => {
   const s = net.createServer();
@@ -59,7 +59,8 @@ async function startServer() {
     SWAP_STATE_DIR: path.join(dir, 'state'),
     VAULT_PROVIDER: 'file',
     VAULT_FILE_DIR: path.join(dir, 'vault'),
-    VAULT_ALLOWED_ACCOUNTS: 'a,b,ghost',
+    PROTECTED_ACCOUNTS: 'work',
+    DELETE_PASSPHRASE_FILE: path.join(dir, 'delete-passphrase'),
   };
   const p = spawn(process.execPath, [path.join(ROOT, 'src', 'server.js')], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
@@ -191,13 +192,9 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   };
   const cliEntry = { version: 1, format: 'cli-keychain', pushedAt: '2026-01-01T00:00:00.000Z', host: 'elsewhere', fp: 'x', credential: '{"t":"SECRET"}' };
   await put('cli/ghost.json', cliEntry);
-  await put('cli/stranger.json', cliEntry);
   r = await s.call('/api/vault/accounts');
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.accounts.ghost, { desktop: null, cli: { pushedAt: '2026-01-01T00:00:00.000Z', host: 'elsewhere' }, allowed: true, local: false });
-  assert.equal(r.body.accounts.stranger.allowed, false);
-  r = await s.post('/api/vault/add?account=stranger');
-  assert.equal(r.status, 403);
+  assert.deepEqual(r.body.accounts.ghost, { desktop: null, cli: { pushedAt: '2026-01-01T00:00:00.000Z', host: 'elsewhere' }, local: false });
   r = await s.post('/api/vault/add?account=nobody');
   assert.equal(r.status, 404);
   r = await s.post('/api/vault/add?account=ghost', { label: 'The ghost' });
@@ -221,7 +218,7 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
     { id: 'ghost', label: 'The ghost' }, { id: 'work', label: 'Work account' }, { id: 'plain', label: 'Account: plain' },
   ]);
   r = await s.call('/api/accounts/work/vault');
-  assert.equal(r.body.desktop.state, 'blocked'); // not in VAULT_ALLOWED_ACCOUNTS: the card says so
+  assert.equal(r.body.desktop.vault, null); // every account may use the Vault; nothing saved yet
 
   // per-account Vault status: counts and times only
   r = await s.call('/api/accounts/ghost/vault');
@@ -232,8 +229,8 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   assert.equal(r.body.desktop.vault, null);
   assert.doesNotMatch(JSON.stringify(r.body), /SECRET/);
   r = await s.call('/api/accounts/c/vault');
-  assert.equal(r.body.desktop.state, 'blocked');
-  assert.match(r.body.desktop.message, /not allowed/);
+  assert.equal(r.body.desktop.state, 'ok');
+  assert.equal(r.body.desktop.vault, null);
 
   // backup files in a folder: names, sizes and times, filtered by account
   await fs.writeFile(path.join(s.dir, 'claude-backup-a-20260101-000000.csbk'), 'x');
@@ -258,11 +255,84 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   assert.equal(r.status, 200);
   r = await remove('nobody');
   assert.equal(r.status, 404);
+  r = await remove('work'); // protected: no removal, no deletion, ever
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /protected/);
+  r = await s.post('/api/accounts/work/delete', { confirm: 'work', targets: { cliFolder: true } });
+  assert.equal(r.status, 403);
+  r = await s.call('/api/state');
+  assert.deepEqual(r.body.accounts.map((x) => [x.id, x.protected]), [['a', false], ['b', false], ['ghost', false], ['work', true]]);
   r = await s.call('/api/state');
   assert.deepEqual(r.body.accounts.map((x) => x.id), ['a', 'b', 'ghost', 'work']);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(s.dir, 'accounts.local.json'), 'utf8')).map((x) => x.id), ['ghost', 'work']);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(s.dir, 'accounts.json'), 'utf8')).map((x) => x.id), ['a', 'b']);
   assert.equal(await exists(path.join(s.support, 'Claude.b')), true); // data is never touched by a removal
+
+  // deleting data: what b holds, then everything ticked, behind the typed name and a passphrase
+  const user = baseEnv().USER;
+  await s.stubs.seedKeychain(cliService(path.join(s.dir, 'claude-b')), user, '{"t":"B-SECRET"}');
+  await put('cli/b.json', { ...cliEntry, pushedAt: '2026-02-01T00:00:00.000Z' });
+  await fs.writeFile(path.join(s.dir, 'claude-backup-b-20260202-000000.csbk'), 'yy');
+  r = await s.call(`/api/accounts/b/holdings?backupFolder=${encodeURIComponent(s.dir)}`);
+  assert.equal(r.status, 200);
+  assert.ok(r.body.mac.appData.path.endsWith('Claude.b'));
+  assert.equal(typeof r.body.mac.appData.bytes, 'number');
+  assert.ok(r.body.mac.cliFolder.path.endsWith('claude-b'));
+  assert.equal(r.body.mac.keychain.present, true);
+  assert.equal(r.body.vault.cli.vault.pushedAt, '2026-02-01T00:00:00.000Z');
+  assert.equal(r.body.vault.desktop.vault, null);
+  assert.deepEqual(r.body.backups.files.map((f) => f.name), ['claude-backup-b-20260202-000000.csbk', 'claude-backup-b-20260101-000000.csbk']);
+  assert.equal(r.body.passphraseSet, false);
+  assert.doesNotMatch(JSON.stringify(r.body), /SECRET/);
+
+  const all = { vaultDesktop: true, vaultCli: true, keychain: true, appData: true, cliFolder: true, backups: r.body.backups.files.map((f) => f.path) };
+  r = await s.post('/api/accounts/b/delete', { confirm: 'nope', targets: all, backupFolder: s.dir });
+  assert.equal(r.status, 400);
+  r = await s.post('/api/accounts/a/delete', { confirm: 'a', targets: { cliFolder: true } });
+  assert.equal(r.status, 409); // the Claude app is on a
+  r = await s.post('/api/deletion-passphrase', { next: 'short' });
+  assert.equal(r.status, 400);
+  r = await s.post('/api/deletion-passphrase', { next: 'open sesame 1' });
+  assert.equal(r.status, 200);
+  r = await s.call('/api/deletion-passphrase');
+  assert.deepEqual(r.body, { set: true });
+  r = await s.post('/api/deletion-passphrase', { next: 'open sesame 2' });
+  assert.equal(r.status, 403); // changing needs the current one
+  r = await s.post('/api/deletion-passphrase', { current: 'open sesame 1', next: 'open sesame 2' });
+  assert.equal(r.status, 200);
+  r = await s.post('/api/accounts/b/delete', { confirm: 'b', targets: all, backupFolder: s.dir });
+  assert.equal(r.status, 403); // no passphrase given
+  r = await s.post('/api/accounts/b/delete', { confirm: 'b', passphrase: 'open sesame 1', targets: all, backupFolder: s.dir });
+  assert.equal(r.status, 403); // the old one
+  assert.equal(await exists(path.join(s.support, 'Claude.b')), true); // nothing happened so far
+
+  // a file of another account is refused, the card stays, nothing else is touched
+  r = await s.post('/api/accounts/b/delete', { confirm: 'b', passphrase: 'open sesame 2', targets: { backups: [path.join(s.dir, 'claude-backup-a-20260101-000000.csbk')] }, backupFolder: s.dir });
+  assert.equal(r.status, 200);
+  assert.match(r.body.errors.backups, /not a backup of this account/);
+  assert.equal(r.body.removed, false);
+  assert.equal(await exists(path.join(s.dir, 'claude-backup-a-20260101-000000.csbk')), true);
+  r = await s.call('/api/state');
+  assert.ok(r.body.accounts.some((x) => x.id === 'b'));
+
+  r = await s.post('/api/accounts/b/delete', { confirm: 'b', passphrase: 'open sesame 2', targets: all, backupFolder: s.dir });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.errors, {});
+  assert.equal(r.body.removed, true);
+  assert.match(r.body.done.vaultDesktop, /Nothing in the vault/);
+  assert.match(r.body.done.vaultCli, /Deleted/);
+  assert.match(r.body.done.keychain, /Deleted/);
+  assert.equal(await exists(path.join(s.support, 'Claude.b')), false);
+  assert.equal(await exists(path.join(s.dir, 'claude-b')), false);
+  assert.equal(await exists(path.join(s.dir, 'vault', 'cli', 'b.json')), false);
+  await assert.rejects(s.stubs.readKeychain(cliService(path.join(s.dir, 'claude-b')), user));
+  assert.equal(await exists(path.join(s.dir, 'claude-backup-b-20260202-000000.csbk')), false);
+  assert.equal(await exists(path.join(s.dir, 'claude-backup-b-20260101-000000.csbk')), false);
+  assert.equal(await exists(path.join(s.dir, 'claude-backup-a-20260101-000000.csbk')), true); // another account's backup stays
+  assert.equal(await exists(path.join(s.support, 'Claude')), true); // the active account's data stays
+  assert.equal(await exists(path.join(s.dir, 'vault', 'cli', 'ghost.json')), true);
+  r = await s.call('/api/state');
+  assert.deepEqual(r.body.accounts.map((x) => x.id), ['a', 'ghost', 'work']);
 
   assert.doesNotMatch(s.log(), /SECRET|Error/);
 });

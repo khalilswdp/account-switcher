@@ -5,6 +5,7 @@
 //   node scripts/desktop-vault.mjs push <name> [--force]      read the account's files, decrypt, upload
 //   node scripts/desktop-vault.mjs pull <name> [--as <new>]   rebuild it as a parked account on this Mac
 //   node scripts/desktop-vault.mjs load <name>                merge the saved login into the account's own folder
+//   node scripts/desktop-vault.mjs forget <name>              delete the account's entry from the vault (every version)
 //
 // Why decrypted: the desktop app encrypts its cookies and login token with a per-Mac key
 // held in the Keychain ("Claude Safe Storage"). That key is a long-lived master secret, so
@@ -18,7 +19,6 @@
 // Only the login cookie (sessionKey) is stored by default: it is all the app needs to start
 // signed in. Reading the Keychain item makes macOS ask you to allow it. Nothing secret is
 // ever printed.
-//   VAULT_ALLOWED_ACCOUNTS  comma list, default "test"
 //   DESKTOP_ITEMS           comma list of items to store instead (config.json, "Local Storage", ...)
 //   DESKTOP_COOKIES         comma list of cookie names to keep, default "sessionKey" ("*" keeps all)
 import fs from 'node:fs/promises';
@@ -36,7 +36,6 @@ const SUPPORT = process.env.SUPPORT_DIR || path.join(os.homedir(), 'Library/Appl
 const SWAP_STATE_DIR = process.env.SWAP_STATE_DIR || path.join(os.homedir(), '.claude-desktop-accounts');
 const BACKUP_DIR = process.env.BACKUP_DIR || '.backups';
 const SERVICE = process.env.SAFE_STORAGE_SERVICE || 'Claude Safe Storage';
-const ALLOWED = (process.env.VAULT_ALLOWED_ACCOUNTS || 'test').split(',').map((s) => s.trim()).filter(Boolean);
 // Tested on 2026-11-04: the app starts signed in from the Cookies file alone (config.json alone
 // does not). Everything else it rebuilds itself, so only the cookies are stored.
 const ITEMS = (process.env.DESKTOP_ITEMS || 'Cookies').split(',').map((s) => s.trim()).filter(Boolean);
@@ -62,10 +61,7 @@ const activeName = () => {
 const appRunning = () =>
   !process.env.SWAP_SKIP_RUNNING_CHECK && spawnSync('pgrep', ['-f', '/Applications/Claude.app/Contents/']).status === 0;
 
-function checkAllowed(name) {
-  validName(name);
-  if (!ALLOWED.includes(name)) fail(`"${name}" is not allowed (VAULT_ALLOWED_ACCOUNTS=${ALLOWED.join(',')}). Add it there to opt in.`);
-}
+const checkName = (name) => void validName(name);
 
 // ------------------------------------------------------------------ packing
 
@@ -272,7 +268,7 @@ const lastRev = (n) => fs.readFile(revFile(n), 'utf8').then((s) => s.trim(), () 
 // ----------------------------------------------------------------- commands
 
 async function status(name, asJson) {
-  checkAllowed(name);
+  checkName(name);
   const remote = await readRemote(name);
   if (asJson) {
     return console.log(JSON.stringify({ vault: remote ? { items: remote.items, pushedAt: remote.pushedAt, host: remote.host } : null }));
@@ -283,7 +279,7 @@ async function status(name, asJson) {
 }
 
 async function push(name, force) {
-  checkAllowed(name);
+  checkName(name);
   const isActive = activeName() === name;
   const source = isActive ? activeFolder : parked(name);
   if (!(await exists(source))) fail(`no folder for "${name}" at ${source}`);
@@ -329,7 +325,7 @@ async function push(name, force) {
 }
 
 async function pull(name, asName) {
-  checkAllowed(name);
+  checkName(name);
   const target = asName || name;
   validName(target);
   if (target === activeName()) fail(`"${target}" is the active account; pull into another name with --as`);
@@ -359,7 +355,7 @@ async function pull(name, asName) {
 // Like pull, but into the account's own folder: the saved cookie is merged into what is there
 // (or the folder is created if missing). The Claude app must not be using that folder.
 async function load(name) {
-  checkAllowed(name);
+  checkName(name);
   const remote = await readRemote(name);
   if (!remote) fail(`nothing in the vault for "${name}" yet`);
   const isActive = activeName() === name;
@@ -380,16 +376,27 @@ async function load(name) {
   console.log(`Loaded "${name}" from the vault into ${target}.`);
 }
 
+// Deletes the account's entry from the vault, every version of it. Nothing on this Mac is touched.
+async function forget(name) {
+  checkName(name);
+  const had = Boolean(await provider().read(remoteId(name)));
+  await provider().delete(remoteId(name));
+  await fs.rm(revFile(name), { force: true });
+  console.log(had ? `Deleted the "${name}" desktop login from the vault (every version).` : `Nothing in the vault for "${name}".`);
+}
+
 const [cmd, name, ...rest] = process.argv.slice(2);
 const flag = (f) => rest.includes(f);
 const asIndex = rest.indexOf('--as');
 try {
   if (cmd === 'status') {
-    for (const n of name ? [name] : ALLOWED) await status(n, flag('--json'));
+    if (!name) fail('usage: status <name> [--json]');
+    await status(name, flag('--json'));
   } else if (cmd === 'push') await push(name, flag('--force'));
   else if (cmd === 'pull') await pull(name, asIndex >= 0 ? rest[asIndex + 1] : undefined);
   else if (cmd === 'load') await load(name);
-  else fail('usage: desktop-vault.mjs <status [name] | push <name> [--force] | pull <name> [--as <new>] | load <name>>');
+  else if (cmd === 'forget') await forget(name);
+  else fail('usage: desktop-vault.mjs <status [name] | push <name> [--force] | pull <name> [--as <new>] | load <name> | forget <name>>');
 } catch (e) {
   fail(e.message);
 }

@@ -11,8 +11,10 @@ macOS only. Read the first section before touching anything.
    with a fake `security` command (no real Keychain, no prompts), fake `pgrep`/`osascript`/`open`, and
    the file provider as the Vault. It never touches the real Vault or real logins. If you change behaviour,
    extend it; do not trust a green `node --check`.
-3. **The corporate account.** `main` is a company account. It is opted in to the Vault through the
-   gitignored `.env` at the user's request. Check company policy before widening that.
+3. **Protected accounts.** `main` is the company account and is protected (`PROTECTED_ACCOUNTS` in the
+   gitignored `.env`, default `main`): it is switched to, saved to the Vault and backed up like any
+   other, but the page can never remove it or delete anything of it. Every account may use the Vault;
+   the earlier allow-list (`VAULT_ALLOWED_ACCOUNTS`) is gone, by the user's decision on 2026-11-04.
 4. **The browser part was dropped on purpose** (2026-11-04). See "Dropped" below before adding it back.
 
 ## What this is
@@ -35,7 +37,7 @@ so use a current release), Docker Desktop, the `claude` CLI, the Claude desktop 
 
 ```bash
 npm install
-cp .env.example .env                       # sets VAULT_ALLOWED_ACCOUNTS
+cp .env.example .env                       # sets PROTECTED_ACCOUNTS
 node scripts/vault-local.mjs up            # start the Vault container
 node scripts/vault-local.mjs init          # first time only; copy ~/.claude-switcher-vault/keys.json to a password manager
 npm start                                  # dashboard; restarts itself when server code changes, and the page reloads itself
@@ -93,25 +95,43 @@ app signed in as right now?" (`POST /api/desktop/init/:id`). An account with no 
 via the app…" (`POST /api/desktop/new/:id`: parks the current data, reopens the app signed out). An
 account that exists only in the Vault is listed with "Add to this Mac" (`POST /api/vault/add?account=`,
 optional `{label}`), after which its card's Load buttons bring the logins over. Both kinds are remembered
-in `.accounts.local.json`. A new account must be added to `VAULT_ALLOWED_ACCOUNTS` in `.env` before its
-Vault buttons work (the card says so). "Remove from this Mac" on a card forgets the account
-(`DELETE /api/accounts/:id`), in whichever file listed it, and deletes none of its data: app folder,
-Claude Code folder, Keychain login and Vault entries all stay, so it can be added back. Its dialog says
-exactly what the account has (on this Mac: app data, Claude Code folder, Keychain login, from
-`onThisMac` in `/api/state` plus the Vault status; in the Vault: which logins, saved when) and is a
-light one-liner when there is nothing anywhere. It is refused while the Claude app is on that account.
-With no accounts at all the page shows an empty state. When a surface has nothing on this Mac but the
+in `.accounts.local.json`. A protected account (`PROTECTED_ACCOUNTS` in `.env`, default `main`) shows a
+"Protected" chip, has no "Remove from this Mac" at all, and the server refuses to forget it or delete
+anything of it (`guardProtected`); its own Vault entry can still be loaded back onto it, and no account
+can ever load another account's entry (a card only ever loads `desktop/<its id>` and `cli/<its id>`).
+"Remove from this Mac" on any other card opens the removal dialog. By
+itself it forgets the account (`DELETE /api/accounts/:id`), in whichever file listed it, and deletes
+none of its data. The dialog first asks the server what the account holds (`GET
+/api/accounts/:id/holdings?backupFolder=`: Vault entries, app data folder and Claude Code folder with
+sizes from `du`, Keychain login, backup files of that account in the remembered folder) and lists each
+as a checkbox under "Also delete, permanently". With nothing ticked it is a plain removal; with
+anything ticked it asks to type the short name, plus the deletion passphrase when one is set, and
+posts `/api/accounts/:id/delete` with `{confirm, passphrase, targets, backupFolder}`. The server
+deletes each ticked item on its own (Vault entries through `desktop-vault.mjs forget` and
+`cli-vault.mjs forget`, the Keychain item through `cli-vault.mjs forget-keychain`, folders with `rm`
+behind a guard that refuses the home folder or anything above it, backup files only if they are that
+account's own in that folder) and forgets the card only when every item succeeded; otherwise the card
+stays with the failures in the activity log. It is refused while the Claude app is on that account.
+The deletion passphrase is optional: "Require a passphrase for deletions…" in the dialog sets it
+(`POST /api/deletion-passphrase` with `{current?, next}`), stored as a scrypt hash in
+`~/.claude-switcher-vault/delete-passphrase` (`DELETE_PASSPHRASE_FILE` overrides); delete that file to
+stop requiring one. With no accounts at all the page shows an empty state. When a surface has nothing on this Mac but the
 Vault has its login, that row says so and "Load from Vault" becomes its primary button; the strip says
 how many Vault accounts are not on this Mac yet.
 
 **Vault layout.** KV v2 mount `secret/`, entries under `claude-switcher/`: `desktop/<name>` and
 `cli/<name>`. Each value is one JSON "envelope". History is capped at 2 versions (`trim`). The helper
-uses a limited token (policy: read, write, list under `claude-switcher` only). A push does nothing when
+uses a limited token (policy: read, write, list and delete under `claude-switcher` only; "delete" was
+added on 2026-11-04 for the removal dialog, so an older Vault needs `npm run vault:local -- policy`
+once, otherwise deletions from the page fail with a message saying so). A push does nothing when
 nothing changed (a fingerprint, or the Keychain item's modified time for the CLI), so there is no new
 version and no Keychain prompt. A push refuses when the Vault copy changed from another Mac since this
-one last synced; the page then asks whether to replace it and retries with `?force=1`. Entries directly
-under `claude-switcher/` (the old browser sessions) are ignored; purge them with
-`npm run vault:local -- purge <name>`.
+one last synced; the page then asks whether to replace it and retries with `?force=1`. Each entry is one KV field `envelope` holding the JSON text the scripts write (an entry
+written by hand in the Vault UI as separate fields is accepted when it has a `version` field). The
+listing names entries it cannot read (empty or non-JSON envelope, no `pushedAt`) under `unreadable`, and
+entries directly under `claude-switcher/` (the old browser sessions) under `ignored`; the page shows
+both in the strip. Purge an old entry with `npm run vault:local -- purge <name>`. The page refreshes the
+listing every 30 s and after every Vault action.
 
 **Crypto (desktop).** The app encrypts cookies with a per-Mac key from the Keychain item
 "Claude Safe Storage". That key never leaves the Mac. Push decrypts the cookie locally and stores it
@@ -137,8 +157,8 @@ the browser part was dropped also holds `vault/<name>.json`; `apply` skips it an
 npm start                                          # dashboard (npm run dev is the same)
 npm test                                           # test suite
 npm run vault:local -- status | unseal | token | policy | trim | purge <entry> | backup <file> | restore <file>
-npm run desktop-vault -- push|pull|load|status <name>   # pull takes --as <newname>
-npm run cli-vault -- push|pull|status <name>       # pull takes --config <folder> and --replace
+npm run desktop-vault -- push|pull|load|status|forget <name>   # pull takes --as <newname>; forget deletes the Vault entry
+npm run cli-vault -- push|pull|status|forget|forget-keychain <name>   # pull takes --config <folder> and --replace
 npm run vault:list
 npm run backup -- backup <name> --to <folder> [--replace]
 npm run backup -- verify <file>
@@ -150,27 +170,31 @@ Backup and restore read the passphrase from the terminal (hidden) or from the fi
 
 ## Rules the code keeps
 
-- Never overwrite or delete the user's data. Loads merge; restores add; a backup never reuses a file name.
+- Never overwrite or delete the user's data unless they tick it in the removal dialog. Loads merge;
+  restores add; a backup never reuses a file name.
 - Anything destructive (replace a CLI login, quit the desktop app, replace old backups, replace a Vault
-  copy) is confirmed in the UI first, with the consequence spelled out.
+  copy) is confirmed in the UI first, with the consequence spelled out. Deleting data needs the typed
+  short name and, when set, the deletion passphrase.
 - Passphrases travel in a request body, then stdin; never a URL, argument or log line.
 - The server binds to `127.0.0.1`, refuses any request whose `Host` is not local (DNS rebinding), and
   rejects POSTs whose `Origin` is not its own host.
 - One Vault operation at a time (`vaulting` flag): login reads can show Keychain prompts.
-- `VAULT_ALLOWED_ACCOUNTS` (in `.env`) gates every save and load per account; default `test` only.
+- `PROTECTED_ACCOUNTS` (in `.env`, default `main`) are never removed and nothing of theirs is ever
+  deleted from the page. Every account may use the Vault.
 
 ## State at handoff
 
 **Covered by `npm test`** (13 tests): crypto round trips and host binding; `desktop-swap.sh` init/new/use,
 rollback refusals, running-app refusal; desktop push (only `sessionKey`, decrypted, consent cookie left
 out), unchanged-push skip, pull into a parked folder, load merging into an existing cookie file,
-allow-list, changed-elsewhere refusal and `--force`; CLI push/pull/replace with the Keychain item name
+changed-elsewhere refusal and `--force`; CLI push/pull/replace with the Keychain item name
 derived from the config path; the Vault listing (old browser entries ignored); backup, verify, inspect,
 wrong passphrase, damaged file, `--replace`, additive apply (existing file kept, mtime kept, caches left
 out, no cookie file), loading the restored entry on a "new Mac"; the server's state, Host/Origin guards,
 JSON 404, desktop init/new/switch with quit and reopen, the CLI launcher command, adding accounts (new
-and from the Vault), per-account Vault status without values, backup listing, and the port-in-use
-message. Every test also checks that no fake secret appears in any output.
+and from the Vault), protected accounts refusing removal and deletion, the holdings report, deletion
+behind the typed name and passphrase, per-account Vault status without values, backup listing, and
+the port-in-use message. Every test also checks that no fake secret appears in any output.
 
 **Verified on the user's real machine (earlier):** the desktop switch (quit, swap, reopen), signing in from
 cookie-only folders, a pull built from the Vault, a CLI login restored into a fresh config folder, and
@@ -239,5 +263,5 @@ Reuse these helpers for anything new; add a stub rather than touching a real sys
 3. **Clean up after the browser part**: `npm run vault:local -- purge main` (and `test` if it has one) for
    the old browser sessions in the Vault, delete `.profiles/` and `.state/`, and delete the Playwright
    browser cache in `~/Library/Caches/ms-playwright` if nothing else uses it.
-4. Decide whether every account should be allowed in the Vault by default (an exclusion list instead of
-   `VAULT_ALLOWED_ACCOUNTS`), now that accounts can be added from the page.
+4. Protection is set in `.env` on purpose, so that it cannot be switched off by a click on the page. If
+   editing `.env` proves annoying, a page toggle should at least demand the deletion passphrase.

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
+import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
@@ -79,10 +80,20 @@ const httpError = (status, message) => Object.assign(new Error(message), { statu
 const expandHome = (p) => (p === '~' ? os.homedir() : p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
 const exists = (p) => fs.access(p).then(() => true, () => false);
 
+// Protected accounts (PROTECTED_ACCOUNTS in .env, default "main"): switched to, saved to the Vault
+// and backed up like any other, but never removed from this Mac, and nothing of theirs is ever
+// deleted from this page. Loading their own Vault entry back onto them is allowed; there is no way
+// to load another account's entry onto any account.
+const PROTECTED = new Set((process.env.PROTECTED_ACCOUNTS ?? 'main').split(',').map((s) => s.trim()).filter(Boolean));
+function guardProtected(id) {
+  if (PROTECTED.has(id)) throw httpError(403, `"${id}" is a protected account: it cannot be removed or deleted from (PROTECTED_ACCOUNTS in .env)`);
+}
+
 // Forgets an account on this Mac: its card goes, in whichever file listed it. Nothing of its data is
 // deleted (app data folder, Claude Code folder, Keychain login, Vault entries), so it can be added
 // back any time. Refused while the Claude app is on it.
 async function forgetAccount(id) {
+  guardProtected(id);
   const state = await desktopState();
   if (state.supported && state.active === id) throw httpError(409, 'The Claude app is on this account: switch it to another account first');
   const base = readList(ACCOUNTS_FILE) ?? DEFAULT_ACCOUNTS;
@@ -427,6 +438,141 @@ const backupFile = (file) => {
   return file;
 };
 
+// ------------------------------------------------- Deleting an account's data
+
+// What an account holds, for the removal dialog: its Vault entries, what is on this Mac (with
+// sizes), and its backup files in the folder the page remembers. Names, sizes and times only.
+const SUPPORT = process.env.SUPPORT_DIR || path.join(os.homedir(), 'Library/Application Support');
+const cliDirOf = (id) => expandHome(ACCOUNTS[id].cliConfigDir ?? '~/.claude');
+const duBytes = async (dir) => {
+  try {
+    return Number((await run('du', ['-sk', dir])).stdout.split('\t')[0]) * 1024;
+  } catch {
+    return null;
+  }
+};
+
+async function holdings(id, backupFolder) {
+  const desktop = await desktopState();
+  const vault = await vaultStatus(id);
+  const appDir = desktop.supported ? path.join(SUPPORT, desktop.active === id ? 'Claude' : `Claude.${id}`) : null;
+  const cliDir = cliDirOf(id);
+  return {
+    vault,
+    mac: {
+      appActive: Boolean(desktop.supported && desktop.active === id),
+      appData: appDir && (await exists(appDir)) ? { path: appDir, bytes: await duBytes(appDir) } : null,
+      cliFolder: (await exists(cliDir)) ? { path: cliDir, bytes: await duBytes(cliDir) } : null,
+      keychain: vault.cli.local ?? null,
+    },
+    backups: backupFolder ? await listBackups(backupFolder, id).catch(() => null) : null,
+    passphraseSet: await passphraseSet(),
+  };
+}
+
+// An optional passphrase that every deletion must give. Only a scrypt hash is stored, next to the
+// Vault keys. Setting a new one needs the current one.
+const PASS_FILE = process.env.DELETE_PASSPHRASE_FILE
+  || path.join(process.env.VAULT_LOCAL_DIR || path.join(os.homedir(), '.claude-switcher-vault'), 'delete-passphrase');
+const scryptAsync = promisify(scrypt);
+const SCRYPT = { N: 1 << 15, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
+const passphraseSet = () => exists(PASS_FILE);
+
+async function checkPassphrase(given) {
+  let stored;
+  try {
+    stored = (await fs.readFile(PASS_FILE, 'utf8')).trim();
+  } catch {
+    return; // none set
+  }
+  const [, saltHex, hashHex] = stored.split('$');
+  if (typeof given !== 'string' || !given) throw httpError(403, 'enter the deletion passphrase');
+  const hash = await scryptAsync(given, Buffer.from(saltHex, 'hex'), 32, SCRYPT);
+  if (!timingSafeEqual(hash, Buffer.from(hashHex, 'hex'))) throw httpError(403, 'wrong deletion passphrase');
+}
+
+async function setPassphrase(current, next) {
+  if (typeof next !== 'string' || next.length < 8) throw httpError(400, 'the passphrase must be at least 8 characters');
+  await checkPassphrase(current);
+  const salt = randomBytes(16);
+  const hash = await scryptAsync(next, salt, 32, SCRYPT);
+  await fs.mkdir(path.dirname(PASS_FILE), { recursive: true, mode: 0o700 });
+  await fs.writeFile(PASS_FILE, `scrypt$${salt.toString('hex')}$${hash.toString('hex')}\n`, { mode: 0o600 });
+}
+
+// Never the home folder, anything above it, or a path too short to be an account's own.
+function guardDeletable(dir) {
+  const home = os.homedir();
+  if (dir === home || home.startsWith(`${dir}/`) || dir.split('/').filter(Boolean).length < 2) {
+    throw new Error(`refusing to delete ${dir}`);
+  }
+}
+
+// Deletes what was ticked, each item on its own so one failure does not stop the rest, then forgets
+// the card when everything succeeded (otherwise the card stays, so the rest can be retried). The
+// typed short name and the passphrase (when set) are checked first; the Claude app must not be on
+// the account.
+async function deleteAccountData(id, { confirm, passphrase, targets = {}, backupFolder } = {}) {
+  guardProtected(id);
+  if (confirm !== id) throw httpError(400, `type the account's short name (${id}) to confirm`);
+  await checkPassphrase(passphrase);
+  const desktop = await desktopState();
+  if (desktop.supported && desktop.active === id) throw httpError(409, 'The Claude app is on this account: switch it to another account first');
+  if (vaulting || switching) throw httpError(409, 'Another Vault or desktop operation is in progress');
+  vaulting = true;
+  const done = {};
+  const errors = {};
+  const step = async (key, fn) => {
+    try {
+      done[key] = await fn();
+    } catch (e) {
+      errors[key] = e.message;
+    }
+  };
+  const viaScript = (script, args) => async () => {
+    const r = await runScript(script, args);
+    if (!r.ok) throw new Error(r.message);
+    return r.message;
+  };
+  try {
+    if (targets.vaultDesktop) await step('vaultDesktop', viaScript('desktop-vault.mjs', ['forget', id]));
+    if (targets.vaultCli) await step('vaultCli', viaScript('cli-vault.mjs', ['forget', id]));
+    if (targets.keychain) await step('keychain', viaScript('cli-vault.mjs', ['forget-keychain', id])); // may show the Keychain prompt
+    if (targets.appData) {
+      await step('appData', async () => {
+        if (!desktop.supported || !desktop.parked.includes(id)) throw new Error('no parked app data for this account');
+        const dir = path.join(SUPPORT, `Claude.${id}`);
+        guardDeletable(dir);
+        await fs.rm(dir, { recursive: true, force: true });
+        return `Deleted the Claude app data folder ${dir}.`;
+      });
+    }
+    if (targets.cliFolder) {
+      await step('cliFolder', async () => {
+        const dir = cliDirOf(id);
+        if (!(await exists(dir))) throw new Error('no Claude Code folder for this account');
+        guardDeletable(dir);
+        await fs.rm(dir, { recursive: true, force: true });
+        return `Deleted the Claude Code folder ${dir}.`;
+      });
+    }
+    if (Array.isArray(targets.backups) && targets.backups.length) {
+      await step('backups', async () => {
+        const { files } = await listBackups(String(backupFolder ?? ''), id);
+        const mine = new Set(files.map((f) => f.path));
+        for (const p of targets.backups) if (!mine.has(p)) throw new Error(`not a backup of this account in that folder: ${p}`);
+        for (const p of targets.backups) await fs.rm(p);
+        return `Deleted ${targets.backups.length} backup file(s): ${targets.backups.map((p) => path.basename(p)).join(', ')}.`;
+      });
+    }
+    const removed = !Object.keys(errors).length;
+    if (removed) await forgetAccount(id);
+    return { ok: removed, done, errors, removed };
+  } finally {
+    vaulting = false;
+  }
+}
+
 // -------------------------------------------------------------------- API
 
 const app = express();
@@ -472,6 +618,7 @@ async function accountList(desktop = null) {
     id,
     label: a.label,
     cliConfigDir: a.cliConfigDir,
+    protected: PROTECTED.has(id),
     onThisMac: {
       appData: Boolean(desktop?.supported && (desktop.active === id || desktop.parked.includes(id))),
       cliFolder: await exists(expandHome(a.cliConfigDir ?? '~/.claude')),
@@ -494,6 +641,15 @@ app.post('/api/accounts', express.json({ limit: '4kb' }), async (req, res) => {
   res.json({ ok: true, account: id, label: ACCOUNTS[id].label });
 });
 app.delete('/api/accounts/:id', async (req, res) => res.json(await forgetAccount(req.params.id)));
+app.get('/api/accounts/:id/holdings', async (req, res) =>
+  res.json(await holdings(req.params.id, req.query.backupFolder ? String(req.query.backupFolder) : null)),
+);
+app.post('/api/accounts/:id/delete', express.json({ limit: '64kb' }), async (req, res) => res.json(await deleteAccountData(req.params.id, req.body ?? {})));
+app.get('/api/deletion-passphrase', async (req, res) => res.json({ set: await passphraseSet() }));
+app.post('/api/deletion-passphrase', express.json({ limit: '4kb' }), async (req, res) => {
+  await setPassphrase(req.body?.current, req.body?.next);
+  res.json({ ok: true, set: true });
+});
 
 app.get('/api/desktop', async (req, res) => res.json({ ...(await desktopState()), switching }));
 app.post('/api/desktop/switch/:name', async (req, res) => {
@@ -529,9 +685,9 @@ app.post('/api/accounts/:id/vault/load', async (req, res) => res.json(await load
 async function vaultAccounts() {
   const r = await runScript('vault-list.mjs', []);
   if (!r.ok) throw httpError(502, r.message);
-  const { accounts } = JSON.parse(r.message);
+  const { accounts, unreadable = [], ignored = [] } = JSON.parse(r.message);
   for (const [id, a] of Object.entries(accounts)) a.local = Boolean(ACCOUNTS[id]);
-  return { accounts };
+  return { accounts, unreadable, ignored };
 }
 app.get('/api/vault/accounts', async (req, res) => res.json(await vaultAccounts()));
 
@@ -541,7 +697,6 @@ app.post('/api/vault/add', express.json({ limit: '4kb' }), async (req, res) => {
   if (!/^[\w-]+$/.test(id)) throw httpError(400, 'invalid account name');
   const entry = (await vaultAccounts()).accounts[id];
   if (!entry) throw httpError(404, `"${id}" is not in the Vault`);
-  if (!entry.allowed) throw httpError(403, `"${id}" is not enabled on this Mac (VAULT_ALLOWED_ACCOUNTS in .env)`);
   await registerAccount(id, String(req.body?.label ?? ''));
   res.json({ ok: true, account: id });
 });
