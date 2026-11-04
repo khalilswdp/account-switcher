@@ -16,6 +16,20 @@
       there is nothing to reconnect and no MFA again until the site expires the session.
     </p>
 
+    <section id="vault-panel" class="mt-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <h2 class="text-sm font-semibold">From the Vault</h2>
+      <p class="mt-1 text-xs text-zinc-500">
+        Pick an account that exists in the Vault, then load one part of it onto this Mac and switch to it:
+        Desktop quits and reopens the Claude app on it, CLI opens Terminal as it, Browser signs its profile in.
+        A new account gets its folders created (CLI config: ~/.claude for main, ~/.claude-&lt;name&gt; for the others).
+      </p>
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <select id="vault-account" class="rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700"></select>
+        <div id="vault-buttons" class="flex flex-wrap gap-2"></div>
+      </div>
+      <p id="vault-saved" class="mt-2 text-xs text-zinc-500"></p>
+    </section>
+
     <div id="cards" class="mt-6 grid gap-4 sm:grid-cols-2"></div>
 
     <section id="desktop" class="mt-6 hidden rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -162,38 +176,28 @@ function card(a) {
   const vi = vaultInfo[a.id];
   const box = h('div', 'mt-3 space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60');
   box.append(h('p', 'font-medium text-zinc-600 dark:text-zinc-300', 'Saved in the Vault'));
-  // One row per part. Each has its own Save button, so you choose what goes to the Vault.
-  const line = (name, [text, dim], part) => {
-    const r = h('div', 'flex items-center justify-between gap-3');
-    const left = h('div', 'min-w-0');
-    left.append(h('div', 'text-zinc-500', name), h('div', dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400', text));
-    r.append(left);
-    if (part) {
-      const locked = inFlight.has(a.id) || a.status === 'busy' || a.status === 'login';
-      const small = 'rounded border px-2 py-1 text-[11px] font-medium hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-700';
-      const group = h('div', 'flex shrink-0 gap-1');
-      const save = h('button', `${small} border-zinc-300 dark:border-zinc-600`, 'Save');
-      save.disabled = locked;
-      save.addEventListener('click', () => {
-        if (confirm(SAVE_CONFIRM[part](a))) call(a.id, `vault?parts=${part}`, 'Saved to Vault');
-      });
-      group.append(save);
-      // Load only makes sense when the Vault has something for this part.
-      if (vi?.[part]?.state === 'ok' && vi[part].vault) {
-        const load = h('button', `${small} border-violet-400 text-violet-700 dark:border-violet-500 dark:text-violet-300`, 'Load');
-        load.disabled = locked;
-        load.addEventListener('click', () => {
-          if (confirm(LOAD_CONFIRM[part](a, vi))) call(a.id, `vault/load?part=${part}`, 'Load from Vault');
-        });
-        group.append(load);
-      }
-      r.append(group);
-    }
+  const line = (name, [text, dim]) => {
+    const r = h('div', 'flex justify-between gap-3');
+    r.append(h('span', 'shrink-0 text-zinc-500', name), h('span', `text-right ${dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400'}`, text));
     box.append(r);
   };
-  line('Desktop app', vaultText(vi?.desktop, () => 'login cookie'), 'desktop');
-  line('Browser (claude.ai)', vaultText(vi?.browser, (v) => `${v.cookies} cookies`), 'browser');
-  line('Claude Code CLI', vaultText(vi?.cli, () => 'CLI login'), 'cli');
+  line('Desktop app', vaultText(vi?.desktop, () => 'login cookie'));
+  line('Browser (claude.ai)', vaultText(vi?.browser, (v) => `${v.cookies} cookies`));
+  line('Claude Code CLI', vaultText(vi?.cli, () => 'CLI login'));
+
+  // Saving is a choice: one small button per part. (Loading is in the "From the Vault" panel.)
+  const saveRow = h('div', 'flex flex-wrap items-center gap-1 border-t border-zinc-200 pt-2 dark:border-zinc-700');
+  saveRow.append(h('span', 'mr-1 text-zinc-500', 'Save to Vault:'));
+  const locked = inFlight.has(a.id) || a.status === 'busy' || a.status === 'login';
+  for (const [part, text] of [['desktop', 'Desktop'], ['browser', 'Browser'], ['cli', 'CLI']]) {
+    const b = h('button', 'rounded border border-zinc-300 px-2 py-1 text-[11px] font-medium hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:hover:bg-zinc-700', text);
+    b.disabled = locked;
+    b.addEventListener('click', () => {
+      if (confirm(SAVE_CONFIRM[part](a))) call(a.id, `vault?parts=${part}`, 'Saved to Vault');
+    });
+    saveRow.append(b);
+  }
+  box.append(saveRow);
   el.append(box);
 
   const actions = h('div', 'mt-4 flex flex-wrap gap-2');
@@ -333,10 +337,107 @@ async function refreshDesktop() {
   }
 }
 
+// ----------------------------------------------------------- "From the Vault" panel
+
+let vaultAccounts = {}; // name -> { desktop, browser, cli, allowed, local } from the Vault listing
+let vaultPanelBusy = false;
+let vaultPanelKey = '';
+const PARTS = [['desktop', 'Desktop'], ['browser', 'Browser'], ['cli', 'CLI']];
+
+// The buttons depend on which account is picked, so they are rebuilt on their own when it changes.
+function renderVaultButtons() {
+  const name = $('#vault-account').value;
+  const entry = vaultAccounts[name];
+  const box = $('#vault-buttons');
+  box.replaceChildren();
+  if (!entry) return;
+  for (const [part, text] of PARTS) {
+    const info = entry[part];
+    const b = h('button', `${BTN} bg-violet-600 text-white hover:bg-violet-500`, text);
+    b.disabled = vaultPanelBusy || !info || !entry.allowed;
+    b.title = info ? `Saved ${when(info.pushedAt)}` : 'Nothing saved for this part';
+    b.addEventListener('click', () => loadFromVault(name, part));
+    box.append(b);
+  }
+  $('#vault-saved').textContent = entry.allowed
+    ? PARTS.map(([p, text]) => `${text}: ${entry[p] ? when(entry[p].pushedAt) : 'not saved'}`).join('   |   ')
+    : 'This account is not enabled on this machine (VAULT_ALLOWED_ACCOUNTS).';
+}
+
+function renderVaultPanel() {
+  const select = $('#vault-account');
+  const names = Object.keys(vaultAccounts).sort();
+  const keep = names.includes(select.value) ? select.value : names[0];
+  select.replaceChildren(...names.map((n) => {
+    const o = h('option', 'text-black', vaultAccounts[n].local ? n : `${n} (new on this Mac)`);
+    o.value = n;
+    return o;
+  }));
+  if (keep) select.value = keep;
+  select.disabled = !names.length;
+  if (!names.length) $('#vault-saved').textContent = 'Nothing in the Vault yet. Use "Save to Vault" on an account below.';
+  renderVaultButtons();
+}
+
+async function loadVaultAccounts() {
+  try {
+    const res = await fetch('/api/vault/accounts');
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      vaultAccounts = {};
+      $('#vault-saved').textContent = res.status === 404 && body.error === 'Not found'
+        ? 'This dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
+        : `Could not read the Vault: ${body.error || res.statusText}`;
+      return renderVaultPanel();
+    }
+    vaultAccounts = body.accounts;
+    // Re-render only on a change, so an open dropdown is not reset by the periodic refresh.
+    const key = JSON.stringify([vaultAccounts, vaultPanelBusy]);
+    if (key === vaultPanelKey) return;
+    vaultPanelKey = key;
+    renderVaultPanel();
+  } catch {
+    /* server restarting: the next poll retries */
+  }
+}
+
+async function loadFromVault(name, part) {
+  const label = accounts.find((a) => a.id === name)?.label ?? name;
+  const vi = vaultInfo[name] ?? { cli: { vault: vaultAccounts[name]?.cli ?? null } };
+  if (!confirm(LOAD_CONFIRM[part]({ label }, vi))) return;
+
+  vaultPanelBusy = true;
+  renderVaultButtons();
+  log(`[${name}] Loading the ${part} part from the Vault...`);
+  try {
+    const res = await fetch(`/api/vault/load?account=${encodeURIComponent(name)}&part=${part}`, { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(res.status === 404 && body.error === 'Not found'
+        ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
+        : body.error || res.statusText);
+    }
+    log(`[${name}] Loaded from the Vault: ${body.message}`);
+  } catch (e) {
+    log(`[${name}] Load failed: ${e.message}`, true);
+  } finally {
+    vaultPanelBusy = false;
+    await refresh();
+    loadVault(name);
+    refreshDesktop();
+    vaultPanelKey = '';
+    loadVaultAccounts();
+  }
+}
+
+$('#vault-account').addEventListener('change', renderVaultButtons);
+
 refresh();
 refreshDesktop();
+loadVaultAccounts();
 setInterval(refresh, 2000);
 setInterval(refreshDesktop, 5000);
+setInterval(loadVaultAccounts, 30000);
 </script>
 </body>
 </html>
