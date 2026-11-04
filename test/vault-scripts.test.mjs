@@ -1,5 +1,5 @@
-// The three login helpers, the Vault listing and the encrypted backup, end to end in scratch
-// folders with a fake Keychain and the file Vault (see helpers.mjs). The values are obviously
+// The two login helpers, the Vault listing and the encrypted backup, end to end in scratch
+// folders with the OS parts faked and the file Vault (see helpers.mjs). The values are obviously
 // fake, and every test checks that the scripts never print them.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,11 +7,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
-import { cliService, exists, makeCookieDb, node, safeKey, scratch, world } from './helpers.mjs';
+import { exists, makeCookieDb, node, safeKey, scratch, world } from './helpers.mjs';
 import { decryptCookie } from '../scripts/lib/chromium-crypto.mjs';
 
 test('desktop-vault: push stores only the session cookie, decrypted; pull and load encrypt it again', async () => {
-  const { dir, env, support } = await world('desktop');
+  const { dir, env, support, stubs } = await world('desktop');
   const key = safeKey();
   const cookies = path.join(support, 'Claude', 'Cookies');
   makeCookieDb(cookies, key, [
@@ -36,14 +36,17 @@ test('desktop-vault: push stores only the session cookie, decrypted; pull and lo
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(JSON.parse(r.out).vault.items, ['Cookies']);
 
-  // pull: a parked folder for another name, readable with this Mac's key
+  // pull: a parked folder for another name, readable with this machine's key (on Windows a new
+  // key, made for that folder; the cookie file goes where this system's app build keeps it)
   r = await node('desktop-vault.mjs', ['pull', 'fake', '--as', 'other'], { env });
   assert.equal(r.code, 0, r.err);
-  const pulled = new DatabaseSync(path.join(support, 'Claude.other', 'Cookies'), { readOnly: true });
+  const pulledFile = [path.join(support, 'Claude.other', 'Network', 'Cookies'), path.join(support, 'Claude.other', 'Cookies')];
+  const pulled = new DatabaseSync((await exists(pulledFile[0])) ? pulledFile[0] : pulledFile[1], { readOnly: true });
   const rows = pulled.prepare('select host_key, name, encrypted_value from cookies').all();
   pulled.close();
   assert.equal(rows.length, 1);
-  assert.equal(decryptCookie(rows[0].encrypted_value, rows[0].host_key, key, 24).toString(), 'sk-ant-sid01-FAKEVALUE');
+  const otherKey = await stubs.keyOf(path.join(support, 'Claude.other'));
+  assert.equal(decryptCookie(rows[0].encrypted_value, rows[0].host_key, otherKey, 24).toString(), 'sk-ant-sid01-FAKEVALUE');
   r = await node('desktop-vault.mjs', ['pull', 'fake', '--as', 'other'], { env });
   assert.equal(r.code, 1);
   assert.match(r.err, /refusing to overwrite/);
@@ -101,7 +104,7 @@ test('cli-vault: push reads the Keychain item; pull writes one and never overwri
   const { dir, env, stubs } = await world('cli');
   const configDir = path.join(dir, 'claude-fake');
   const credential = JSON.stringify({ claudeAiOauth: { accessToken: 'FAKE-ACCESS', refreshToken: 'FAKE-REFRESH' } });
-  await stubs.seedKeychain(cliService(configDir), env.USER, credential);
+  await stubs.seedCliLogin(configDir, credential);
 
   let r = await node('cli-vault.mjs', ['status', 'fake', '--json'], { env });
   assert.equal(r.code, 0, r.err);
@@ -122,7 +125,7 @@ test('cli-vault: push reads the Keychain item; pull writes one and never overwri
   const second = path.join(dir, 'claude-second');
   r = await node('cli-vault.mjs', ['pull', 'fake', '--config', second], { env });
   assert.equal(r.code, 0, r.err);
-  assert.equal(await stubs.readKeychain(cliService(second), env.USER), credential);
+  assert.equal(await stubs.readCliLogin(second), credential);
   assert.equal(await exists(second), true);
   r = await node('cli-vault.mjs', ['pull', 'fake', '--replace'], { env });
   assert.equal(r.code, 0, r.err);
@@ -134,17 +137,17 @@ test('cli-vault: push reads the Keychain item; pull writes one and never overwri
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(JSON.parse(r.out), { local: { present: false }, vault: null });
 
-  // forget: the vault entry; forget-keychain: this Mac's item. Each leaves the other alone.
+  // forget: the vault entry; forget-keychain: this machine's login. Each leaves the other alone.
   r = await node('cli-vault.mjs', ['forget', 'fake'], { env });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /Deleted/);
   assert.equal(await exists(path.join(dir, 'vault', 'cli', 'fake.json')), false);
-  assert.equal(await stubs.readKeychain(cliService(configDir), env.USER), credential);
+  assert.equal(await stubs.readCliLogin(configDir), credential);
   r = await node('cli-vault.mjs', ['forget-keychain', 'fake'], { env });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /Deleted/);
-  await assert.rejects(stubs.readKeychain(cliService(configDir), env.USER));
-  assert.equal(await stubs.readKeychain(cliService(second), env.USER), credential); // the other folder's item stays
+  await assert.rejects(stubs.readCliLogin(configDir));
+  assert.equal(await stubs.readCliLogin(second), credential); // the other folder's login stays
   r = await node('cli-vault.mjs', ['forget-keychain', 'fake'], { env });
   assert.match(r.out, /No CLI login/);
 });
@@ -178,7 +181,7 @@ test('backup.mjs: backup, verify, inspect, additive apply; a wrong passphrase or
   const { dir, env, support, stubs } = await world('backup');
   // the three logins
   makeCookieDb(path.join(support, 'Claude', 'Cookies'), safeKey(), [{ host: 'claude.ai', name: 'sessionKey', value: 'DESKTOP-FAKE' }]);
-  await stubs.seedKeychain(cliService(path.join(dir, 'claude-fake')), env.USER, '{"token":"CLI-FAKE"}');
+  await stubs.seedCliLogin(path.join(dir, 'claude-fake'), '{"token":"CLI-FAKE"}');
   // files that cannot be re-downloaded, plus caches that must be left out
   const cfg = path.join(dir, 'claude-fake');
   await fs.mkdir(path.join(cfg, 'projects', 'p1'), { recursive: true });
@@ -265,15 +268,18 @@ test('backup.mjs: backup, verify, inspect, additive apply; a wrong passphrase or
   const restoredVault = JSON.parse(await fs.readFile(path.join(dir2, 'vault', 'desktop', 'fake.json'), 'utf8'));
   assert.equal(restoredVault.format, 'gzip-base64-json');
 
-  // the restored Vault entry is usable: load it into a parked folder on the "new Mac"
+  // the restored Vault entry is usable: load it into a parked folder on the "new machine" (which
+  // gets its own key on Windows), at the place this system's app build keeps the cookie file
   await fs.mkdir(path.join(dir2, 'state'), { recursive: true });
   await fs.writeFile(path.join(dir2, 'state', 'active'), 'someone-else\n');
   r = await node('desktop-vault.mjs', ['load', 'fake'], { env: env2 });
   assert.equal(r.code, 0, r.err);
-  const db = new DatabaseSync(path.join(dir2, 'support', 'Claude.fake', 'Cookies'), { readOnly: true });
+  const loadedFile = [path.join(dir2, 'support', 'Claude.fake', 'Network', 'Cookies'), path.join(dir2, 'support', 'Claude.fake', 'Cookies')];
+  const db = new DatabaseSync((await exists(loadedFile[0])) ? loadedFile[0] : loadedFile[1], { readOnly: true });
   const row = db.prepare("select host_key, encrypted_value from cookies where name = 'sessionKey'").get();
   db.close();
-  assert.equal(decryptCookie(row.encrypted_value, row.host_key, safeKey(), 24).toString(), 'DESKTOP-FAKE');
+  const newKey = await stubs.keyOf(path.join(dir2, 'support', 'Claude.fake'));
+  assert.equal(decryptCookie(row.encrypted_value, row.host_key, newKey, 24).toString(), 'DESKTOP-FAKE');
 
   // applying again changes nothing
   r = await node('backup.mjs', ['apply', second.file, '--parts', 'vault,config'], { env: env2, input: `${pass}\n` });

@@ -8,6 +8,7 @@
     "test": "node --test \"test/*.test.mjs\"",
     "vault:local": "node scripts/vault-local.mjs",
     "vault:list": "node scripts/vault-list.mjs",
+    "desktop-swap": "node scripts/desktop-swap.mjs",
     "desktop-vault": "node scripts/desktop-vault.mjs",
     "cli-vault": "node scripts/cli-vault.mjs",
     "backup": "node scripts/backup.mjs"

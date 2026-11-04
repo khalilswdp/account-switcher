@@ -5,7 +5,7 @@ name: ${COMPOSE_PROJECT_NAME:-claude-switcher-vault}
 
 services:
   vault:
-    image: hashicorp/vault:2.2.1
+    image: ${VAULT_IMAGE:-hashicorp/vault:2.2.1} # VAULT_IMAGE overrides the version
     command: ["server"]
     restart: unless-stopped # comes back after a reboot, but sealed: run "unseal"
     ports:

@@ -1,24 +1,28 @@
 #!/usr/bin/env node
-// Keep a Claude desktop account in the vault, DECRYPTED, so another Mac can run it.
+// Keep a Claude desktop account in the vault, DECRYPTED, so another machine can run it.
 //
 //   node scripts/desktop-vault.mjs status [name]
 //   node scripts/desktop-vault.mjs push <name> [--force]      read the account's files, decrypt, upload
-//   node scripts/desktop-vault.mjs pull <name> [--as <new>]   rebuild it as a parked account on this Mac
+//   node scripts/desktop-vault.mjs pull <name> [--as <new>]   rebuild it as a parked account on this machine
 //   node scripts/desktop-vault.mjs load <name>                merge the saved login into the account's own folder
 //   node scripts/desktop-vault.mjs forget <name>              delete the account's entry from the vault (every version)
 //
-// Why decrypted: the desktop app encrypts its cookies and login token with a per-Mac key
-// held in the Keychain ("Claude Safe Storage"). That key is a long-lived master secret, so
-// it never leaves the Keychain. On push the data is decrypted locally; on pull it is
-// encrypted again with THIS Mac's own key, so no key is ever shared between machines.
+// Why decrypted: the desktop app encrypts its cookies and login token with a key that stays on
+// the machine (macOS: one per Mac in the Keychain, "Claude Safe Storage"; Windows: one per data
+// folder in its "Local State" file, protected with DPAPI for that Windows user). That key is a
+// long-lived master secret, so it never leaves the machine. On push the data is decrypted
+// locally; on pull it is encrypted again with THIS machine's own key, so no key is ever shared
+// between machines, and a login saved on a Mac loads on a PC and the other way round.
 //
-// <name> is the account name used by scripts/desktop-swap.sh. A pull creates the parked
-// folder "Claude.<name>"; switch to it with the dashboard or `desktop-swap.sh use <name>`.
+// <name> is the account name used by scripts/desktop-swap.mjs. A pull creates the parked
+// folder "Claude.<name>"; switch to it with the dashboard or `desktop-swap.mjs use <name>`.
 // On a Mac that has never run the app, open it once and quit first (that creates the key).
 //
 // Only the login cookie (sessionKey) is stored by default: it is all the app needs to start
-// signed in. Reading the Keychain item makes macOS ask you to allow it. Nothing secret is
-// ever printed.
+// signed in. On macOS, reading the Keychain item makes the system ask you to allow it. On
+// Windows the app keeps its cookie file locked while it runs, so the account the app is on can
+// only be pushed with the app quit (the dashboard quits and reopens it). Nothing secret is ever
+// printed.
 //   DESKTOP_ITEMS           comma list of items to store instead (config.json, "Local Storage", ...)
 //   DESKTOP_COOKIES         comma list of cookie names to keep, default "sessionKey" ("*" keeps all)
 import fs from 'node:fs/promises';
@@ -26,18 +30,16 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { fail, provider, writeFile0600 } from './lib/vault-client.mjs';
-import { decryptCookie, decryptV10, encryptCookie, encryptV10, readSafeStorageKey } from './lib/chromium-crypto.mjs';
+import { decryptCookie, decryptV10, encryptCookie, encryptV10 } from './lib/chromium-crypto.mjs';
+import { appRunning, cookieFileIn, cookieFileLockedWhileRunning, ensureSafeStorageKey, readSafeStorageKey } from './lib/platform.mjs';
+import { ACTIVE_FOLDER, activeName, parked } from './lib/desktop.mjs';
 
-const SUPPORT = process.env.SUPPORT_DIR || path.join(os.homedir(), 'Library/Application Support');
-const SWAP_STATE_DIR = process.env.SWAP_STATE_DIR || path.join(os.homedir(), '.claude-desktop-accounts');
 const BACKUP_DIR = process.env.BACKUP_DIR || '.backups';
-const SERVICE = process.env.SAFE_STORAGE_SERVICE || 'Claude Safe Storage';
-// Tested on 2026-11-04: the app starts signed in from the Cookies file alone (config.json alone
-// does not). Everything else it rebuilds itself, so only the cookies are stored.
+// Tested on 2026-11-04 (macOS): the app starts signed in from the Cookies file alone (config.json
+// alone does not). Everything else it rebuilds itself, so only the cookies are stored.
 const ITEMS = (process.env.DESKTOP_ITEMS || 'Cookies').split(',').map((s) => s.trim()).filter(Boolean);
 // Also tested: of the cookies, sessionKey alone signs the app in. The consent cookie is left
 // out on purpose: it only hides the cookie banner, and a consent choice should be made on
@@ -46,22 +48,12 @@ const COOKIES = (process.env.DESKTOP_COOKIES || 'sessionKey').split(',').map((s)
 const MAX_ENTRY = 700_000; // bytes of the stored envelope; Vault's default entry limit is about 1 MiB
 
 const validName = (n) => /^[\w-]+$/.test(n ?? '') || fail('account name may only use letters, digits, - and _');
-const parked = (n) => path.join(SUPPORT, `Claude.${n}`);
-const activeFolder = path.join(SUPPORT, 'Claude');
 const remoteId = (n) => `desktop/${n}`;
 const revFile = (n) => path.join(BACKUP_DIR, `desktop-${n}.vault-rev`);
 const exists = (p) => fs.access(p).then(() => true, () => false);
-const activeName = () => {
-  try {
-    return readFileSync(path.join(SWAP_STATE_DIR, 'active'), 'utf8').trim();
-  } catch {
-    return '';
-  }
-};
-const appRunning = () =>
-  !process.env.SWAP_SKIP_RUNNING_CHECK && spawnSync('pgrep', ['-f', '/Applications/Claude.app/Contents/']).status === 0;
-
 const checkName = (name) => void validName(name);
+// Where an item lives inside a data folder: the cookie database moves between builds.
+const itemPath = (folder, name) => (name === 'Cookies' ? cookieFileIn(folder) : path.join(folder, name));
 
 // ------------------------------------------------------------------ packing
 
@@ -96,17 +88,19 @@ function packConfig(file, key) {
   return { kind: 'config', json: cfg, enc, order };
 }
 
-// A consistent copy of a cookie database that is safe to take while the Claude app is using it:
-// SQLite's own VACUUM INTO over a read-only connection (it waits for a writer's lock instead of
-// reading half-written pages), not a file copy. The live file is never written to.
+// A consistent copy of a cookie database that is safe to take while the Claude app is using it
+// (on macOS; Windows locks the file): SQLite's own VACUUM INTO over a read-only connection (it
+// waits for a writer's lock instead of reading half-written pages), not a file copy. The live
+// file is never written to.
 function snapshotCookies(file, dest) {
-  const src = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
+  let src;
   try {
+    src = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
     src.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
   } catch (e) {
-    throw new Error(`could not read the cookie file (${e.message.split('\n')[0]}). Try again in a moment.`);
+    throw new Error(`could not read the cookie file (${e.message.split('\n')[0]}). Quit the Claude app, or try again in a moment.`);
   } finally {
-    src.close();
+    src?.close();
   }
 }
 
@@ -131,7 +125,7 @@ async function packCookies(file, key) {
         v = decryptCookie(r.encrypted_value, r.host_key, key, version);
       } catch {
         db.close();
-        fail('a cookie could not be decrypted. Is this the Mac (and Keychain key) the account was signed in on?');
+        fail('a cookie could not be decrypted. Is this the machine (and the key) the account was signed in on?');
       }
       if (v) values[r.id] = v.toString('base64');
     }
@@ -145,7 +139,7 @@ async function packCookies(file, key) {
 }
 
 async function packItem(name, source, key) {
-  const p = path.join(source, name);
+  const p = itemPath(source, name);
   if (name === 'config.json') return packConfig(p, key);
   if (name === 'Cookies') return packCookies(p, key);
   if ((await fs.stat(p)).isDirectory()) return packDir(p);
@@ -153,12 +147,12 @@ async function packItem(name, source, key) {
 }
 
 // A fingerprint of what would be pushed, taken from the still-encrypted source files, so
-// "nothing changed" can be detected without the Keychain key (no prompt, no new Vault version).
+// "nothing changed" can be detected without the key (no prompt, no new Vault version).
 async function fingerprint(source) {
   const h = createHash('sha256');
   h.update(JSON.stringify({ items: ITEMS, cookies: COOKIES }));
   for (const name of ITEMS) {
-    const p = path.join(source, name);
+    const p = itemPath(source, name);
     if (!(await exists(p))) continue;
     h.update(`\n${name}\n`);
     if (name === 'Cookies') {
@@ -188,7 +182,8 @@ async function fingerprint(source) {
 // ----------------------------------------------------------------- unpacking
 
 async function unpackItem(name, item, root, key) {
-  const p = path.join(root, name);
+  const p = itemPath(root, name);
+  await fs.mkdir(path.dirname(p), { recursive: true, mode: 0o700 });
   if (item.kind === 'config') {
     const filled = { ...item.json };
     for (const [k, b64] of Object.entries(item.enc)) filled[k] = encryptV10(Buffer.from(b64, 'base64'), key).toString('base64');
@@ -217,7 +212,7 @@ async function unpackItem(name, item, root, key) {
 }
 
 // Adds or replaces the saved cookies inside an EXISTING cookie database, encrypted with this
-// Mac's key. The cookies already there, and everything else in the account folder, stay.
+// machine's key. The cookies already there, and everything else in the account folder, stay.
 async function mergeCookies(file, packed, key) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-vault-merge-'));
   try {
@@ -275,16 +270,22 @@ async function status(name, asJson) {
   }
   console.log(`[${name}]`);
   console.log(`  vault : ${remote ? `${remote.items.join(', ')} | pushed ${remote.pushedAt} from ${remote.host}` : 'empty'}`);
-  console.log(`  local : ${(await exists(parked(name))) || activeName() === name ? 'account folder present' : 'no account folder on this Mac'}`);
+  console.log(`  local : ${(await exists(parked(name))) || activeName() === name ? 'account folder present' : 'no account folder on this machine'}`);
 }
 
 async function push(name, force) {
   checkName(name);
   const isActive = activeName() === name;
-  const source = isActive ? activeFolder : parked(name);
-  if (!(await exists(source))) fail(`no folder for "${name}" at ${source}`);
-  // Reading the cookie file is safe while the app runs (see snapshotCookies); only load, which
-  // writes into the folder, needs the app closed.
+  const source = isActive ? ACTIVE_FOLDER : parked(name);
+  if (!(await exists(source))) {
+    if (!activeName()) fail('the Claude app is not assigned to an account yet: at the top of the dashboard, say which account it is signed in as (or run desktop-swap.mjs init <name>), then save again');
+    fail(`no folder for "${name}" at ${source}`);
+  }
+  // On macOS reading the cookie file is safe while the app runs (see snapshotCookies); only load,
+  // which writes into the folder, needs the app closed. Windows locks the file.
+  if (cookieFileLockedWhileRunning && isActive && (await appRunning())) {
+    fail('the Claude app is running on this account, and Windows keeps its cookie file locked while it runs. Quit the app first (the dashboard does that for you).');
+  }
 
   const remote = await readRemote(name);
   const rev = await lastRev(name);
@@ -297,11 +298,11 @@ async function push(name, force) {
     fail(`the vault entry was updated (${remote.pushedAt} from ${remote.host}) since your last pull or push. Pull first, or use --force.`);
   }
 
-  const key = await readSafeStorageKey({ service: SERVICE });
+  const key = await readSafeStorageKey(source);
   const items = {};
   const missing = [];
   for (const item of ITEMS) {
-    if (!(await exists(path.join(source, item)))) missing.push(item);
+    if (!(await exists(itemPath(source, item)))) missing.push(item);
     else items[item] = await packItem(item, source, key);
   }
   if (!items['config.json'] && !items.Cookies) fail('neither config.json nor Cookies found: nothing that holds a login');
@@ -334,13 +335,13 @@ async function pull(name, asName) {
   const remote = await readRemote(name);
   if (!remote) fail(`nothing in the vault for "${name}" yet`);
 
-  const key = await readSafeStorageKey({ service: SERVICE }); // THIS Mac's key
   const items = JSON.parse(gunzipSync(Buffer.from(remote.payload, 'base64')).toString('utf8'));
 
   const partial = `${parked(target)}.partial`;
   await fs.rm(partial, { recursive: true, force: true });
   await fs.mkdir(partial, { recursive: true, mode: 0o700 });
   try {
+    const key = await ensureSafeStorageKey(partial); // THIS machine's key (made for the new folder on Windows)
     for (const [item, packed] of Object.entries(items)) await unpackItem(item, packed, partial, key);
     await fs.rename(partial, parked(target));
   } catch (e) {
@@ -348,8 +349,8 @@ async function pull(name, asName) {
     throw e;
   }
   await writeFile0600(revFile(name), remote.pushedAt);
-  console.log(`Pulled "${name}" into ${parked(target)} (${Object.keys(items).join(', ')}), encrypted with this Mac's key.`);
-  console.log(`Switch to it with the dashboard, or: ./scripts/desktop-swap.sh use ${target}`);
+  console.log(`Pulled "${name}" into ${parked(target)} (${Object.keys(items).join(', ')}), encrypted with this machine's key.`);
+  console.log(`Switch to it with the dashboard, or: node scripts/desktop-swap.mjs use ${target}`);
 }
 
 // Like pull, but into the account's own folder: the saved cookie is merged into what is there
@@ -359,15 +360,15 @@ async function load(name) {
   const remote = await readRemote(name);
   if (!remote) fail(`nothing in the vault for "${name}" yet`);
   const isActive = activeName() === name;
-  const target = isActive ? activeFolder : parked(name);
-  if (isActive && appRunning()) fail('the Claude app is running and this account is the active one. Quit it (Cmd+Q) first.');
+  const target = isActive ? ACTIVE_FOLDER : parked(name);
+  if (isActive && (await appRunning())) fail('the Claude app is running and this account is the active one. Quit it first.');
 
-  const key = await readSafeStorageKey({ service: SERVICE }); // THIS Mac's key
-  const items = JSON.parse(gunzipSync(Buffer.from(remote.payload, 'base64')).toString('utf8'));
   await fs.mkdir(target, { recursive: true, mode: 0o700 });
+  const key = await ensureSafeStorageKey(target); // THIS machine's key
+  const items = JSON.parse(gunzipSync(Buffer.from(remote.payload, 'base64')).toString('utf8'));
   for (const [item, packed] of Object.entries(items)) {
-    if (packed.kind === 'cookies' && (await exists(path.join(target, 'Cookies')))) {
-      await mergeCookies(path.join(target, 'Cookies'), packed, key);
+    if (packed.kind === 'cookies' && (await exists(cookieFileIn(target)))) {
+      await mergeCookies(cookieFileIn(target), packed, key);
     } else {
       await unpackItem(item, packed, target, key);
     }
@@ -376,7 +377,7 @@ async function load(name) {
   console.log(`Loaded "${name}" from the vault into ${target}.`);
 }
 
-// Deletes the account's entry from the vault, every version of it. Nothing on this Mac is touched.
+// Deletes the account's entry from the vault, every version of it. Nothing on this machine is touched.
 async function forget(name) {
   checkName(name);
   const had = Boolean(await provider().read(remoteId(name)));

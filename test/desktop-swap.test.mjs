@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { SCRIPTS, exists, makeStubs, run, scratch } from './helpers.mjs';
+import { exists, makeStubs, node, scratch } from './helpers.mjs';
 
-const swap = (env, ...args) => run('bash', [path.join(SCRIPTS, 'desktop-swap.sh'), ...args], { env });
+const swap = (env, ...args) => node('desktop-swap.mjs', args, { env });
 
 test('desktop-swap: init, new, use, and the refusals that keep data safe', async () => {
   const dir = await scratch('swap');
@@ -53,6 +53,10 @@ test('desktop-swap: init, new, use, and the refusals that keep data safe', async
   r = await swap(env, 'status');
   assert.match(r.out, /Active account : a/);
   assert.match(r.out, /Parked {9}: b/);
+  // a half-made folder from a failed pull is not an account
+  await fs.mkdir(path.join(support, 'Claude.c.partial'));
+  r = await swap(env, 'list');
+  assert.equal(r.out, 'active a\nrunning no\nparked b\n');
 });
 
 test('desktop-swap refuses to move folders while the app is running', async () => {

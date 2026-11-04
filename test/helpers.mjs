@@ -1,10 +1,12 @@
 // Shared test helpers. Every test runs in scratch folders with:
-//   - a fake macOS "security" command on PATH (a file-backed Keychain and a fixed "Safe Storage"
-//     password), so the real Keychain is never read or written and no prompt appears
-//   - fake pgrep / osascript / open commands, so "the Claude app is running", quitting and
-//     reopening it can be simulated
+//   - the OS parts faked (SWITCHER_STUB_DIR, see scripts/lib/platform.mjs): whether the Claude app
+//     "runs" is a marker file, quitting and reopening it and opening a terminal are logged, the
+//     file choosers answer STUB_PICK, and Windows' DPAPI is replaced by a visible marker
+//   - on macOS, a fake "security" command on PATH (a file-backed Keychain and a fixed "Safe
+//     Storage" password), so the real Keychain is never read or written and no prompt appears;
+//     elsewhere the Claude Code login is a file in the scratch config folder, as for real
 //   - the file provider as the Vault (VAULT_PROVIDER=file)
-//   - a scratch HOME, so nothing defaults into the real home folder
+//   - a scratch home folder, so nothing defaults into the real one
 // Nothing here touches real logins. Test values are obviously fake and never printed by the code
 // under test (the tests check that).
 import fsSync from 'node:fs';
@@ -19,26 +21,50 @@ import { encryptCookie } from '../scripts/lib/chromium-crypto.mjs';
 
 export const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const SCRIPTS = path.join(ROOT, 'scripts');
+export const isMac = process.platform === 'darwin';
+export const isWindows = process.platform === 'win32';
 
 export const SAFE_SERVICE = 'Test Safe Storage';
 export const SAFE_PASSWORD = 'fake-safe-storage-password';
-export const safeKey = () => pbkdf2Sync(SAFE_PASSWORD, 'saltysalt', 1003, 16, 'sha1');
+// The app's cookie key in tests: the macOS kind (16 bytes, from the fake Keychain password) on a
+// Mac; the Windows kind (32 bytes, kept in each data folder's "Local State") everywhere else.
+export const safeKey = () => (isMac
+  ? pbkdf2Sync(SAFE_PASSWORD, 'saltysalt', 1003, 16, 'sha1')
+  : createHash('sha256').update('fake-local-state-key').digest());
 
 export const exists = (p) => fs.access(p).then(() => true, () => false);
 export const scratch = (name) => fs.mkdtemp(path.join(os.tmpdir(), `claude-switcher-test-${name}-`));
 
-// The Keychain item name the CLI uses for a config folder (mirrors scripts/cli-vault.mjs).
+// The Keychain item name the CLI uses for a config folder on macOS (mirrors scripts/lib/platform.mjs).
 export const cliService = (configDir) =>
   `Claude Code-credentials-${createHash('sha256').update(path.resolve(configDir).normalize('NFC')).digest('hex').slice(0, 8)}`;
 
 // A minimal environment: never this process's whole env, so a developer's real settings and the
-// desktop app's marker variable (__CFBundleIdentifier) cannot leak into a test.
-export const baseEnv = () => ({
-  USER: process.env.USER || os.userInfo().username,
-  TMPDIR: os.tmpdir(),
-  LANG: 'C',
-  PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
-});
+// desktop app's marker variables cannot leak into a test.
+export const baseEnv = () => {
+  const nodeDir = path.dirname(process.execPath);
+  if (isWindows) {
+    const root = process.env.SystemRoot || 'C:\\Windows';
+    return {
+      SystemRoot: root,
+      windir: root,
+      COMSPEC: process.env.COMSPEC || path.join(root, 'System32', 'cmd.exe'),
+      PATHEXT: process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD',
+      TEMP: os.tmpdir(),
+      TMP: os.tmpdir(),
+      USERNAME: os.userInfo().username,
+      PATH: [nodeDir, path.join(root, 'System32'), root, path.join(root, 'System32', 'WindowsPowerShell', 'v1.0')].join(path.delimiter),
+    };
+  }
+  return {
+    USER: process.env.USER || os.userInfo().username,
+    TMPDIR: os.tmpdir(),
+    LANG: 'C',
+    PATH: [nodeDir, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(path.delimiter),
+  };
+};
+// The scratch home folder, under both names (os.homedir() reads USERPROFILE on Windows).
+export const homeEnv = (dir) => ({ HOME: dir, USERPROFILE: dir });
 
 export function run(cmd, args, { env = {}, input, cwd = ROOT } = {}) {
   return new Promise((resolve) => {
@@ -107,52 +133,50 @@ process.stderr.write('fake security: unsupported ' + args[0] + '\\n');
 process.exit(1);
 `;
 
-const PGREP_STUB = `#!/bin/sh
-# fake pgrep: "the Claude app is running" while the marker file exists
-[ -e "$STUB_STATE/running" ]
-`;
-
-const OSASCRIPT_STUB = `#!/bin/sh
-# fake osascript: records what it was asked; "quit" stops the fake app; the choosers answer STUB_PICK
-printf '%s\\n' "$*" >> "$STUB_STATE/osascript.log"
-case "$*" in
-  *"to quit"*) rm -f "$STUB_STATE/running" ;;
-  *"choose folder"*|*"choose file"*) printf '%s\\n' "$STUB_PICK" ;;
-esac
-exit 0
-`;
-
-const OPEN_STUB = `#!/bin/sh
-# fake open: records the call and "starts" the fake app
-printf '%s\\n' "$*" >> "$STUB_STATE/open.log"
-touch "$STUB_STATE/running"
-exit 0
-`;
+// What scripts/lib/platform.mjs writes in tests instead of a DPAPI blob: "DPAPI" + its fake marker.
+const FAKE_DPAPI = Buffer.from('DPAPIFAKEDPAPI');
 
 export async function makeStubs(dir) {
-  const bin = path.join(dir, 'bin');
-  const keychain = path.join(dir, 'keychain');
   const state = path.join(dir, 'stub-state');
-  await fs.mkdir(bin, { recursive: true });
-  await fs.mkdir(keychain, { recursive: true });
   await fs.mkdir(state, { recursive: true });
-  for (const [name, body] of [['security', SECURITY_STUB], ['pgrep', PGREP_STUB], ['osascript', OSASCRIPT_STUB], ['open', OPEN_STUB]]) {
-    await fs.writeFile(path.join(bin, name), body, { mode: 0o755 });
+  const env = { SWITCHER_STUB_DIR: state, SAFE_STORAGE_SERVICE: SAFE_SERVICE };
+  const keychain = path.join(dir, 'keychain');
+  if (isMac) {
+    const bin = path.join(dir, 'bin');
+    await fs.mkdir(bin, { recursive: true });
+    await fs.mkdir(keychain, { recursive: true });
+    await fs.writeFile(path.join(bin, 'security'), SECURITY_STUB, { mode: 0o755 });
+    env.PATH = `${bin}${path.delimiter}${baseEnv().PATH}`;
+    env.FAKE_KEYCHAIN_DIR = keychain;
   }
-  const file = (service, account) => path.join(keychain, encodeURIComponent(`${service}|${account}`));
+  const keychainFile = (configDir) => path.join(keychain, encodeURIComponent(`${cliService(configDir)}|${baseEnv().USER}`));
+  const credentialsFile = (configDir) => path.join(configDir, '.credentials.json');
   const read = (f) => fs.readFile(f, 'utf8').catch(() => '');
   return {
-    env: {
-      PATH: `${bin}:${baseEnv().PATH}`,
-      FAKE_KEYCHAIN_DIR: keychain,
-      STUB_STATE: state,
-      SAFE_STORAGE_SERVICE: SAFE_SERVICE,
-    },
-    seedKeychain: (service, account, value) => fs.writeFile(file(service, account), value),
-    readKeychain: (service, account) => fs.readFile(file(service, account), 'utf8'),
+    env,
     setRunning: (on) => (on ? fs.writeFile(path.join(state, 'running'), '') : fs.rm(path.join(state, 'running'), { force: true })),
-    osascriptLog: () => read(path.join(state, 'osascript.log')),
+    quitLog: () => read(path.join(state, 'quit.log')),
     openLog: () => read(path.join(state, 'open.log')),
+    terminalLog: () => read(path.join(state, 'terminal.log')),
+    // The Claude Code login of a config folder, where this system's store keeps it.
+    seedCliLogin: async (configDir, value) => {
+      if (isMac) return fs.writeFile(keychainFile(configDir), value);
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(credentialsFile(configDir), value);
+    },
+    readCliLogin: (configDir) => fs.readFile(isMac ? keychainFile(configDir) : credentialsFile(configDir), 'utf8'),
+    // The app's cookie key of a data folder: on a Mac the one fake Keychain key; elsewhere the key
+    // in the folder's "Local State", which seedKey writes and the code under test creates itself.
+    seedKey: async (folder) => {
+      if (isMac) return;
+      await fs.mkdir(folder, { recursive: true });
+      await fs.writeFile(path.join(folder, 'Local State'), JSON.stringify({ os_crypt: { encrypted_key: Buffer.concat([FAKE_DPAPI, safeKey()]).toString('base64') } }));
+    },
+    keyOf: async (folder) => {
+      if (isMac) return safeKey();
+      const raw = Buffer.from(JSON.parse(await fs.readFile(path.join(folder, 'Local State'), 'utf8')).os_crypt.encrypted_key, 'base64');
+      return raw.subarray(FAKE_DPAPI.length);
+    },
   };
 }
 
@@ -183,21 +207,22 @@ export function makeCookieDb(file, key, cookies) {
   db.close();
 }
 
-// The scratch "Mac" most script tests start from: account "fake" active in the desktop app, its
-// Claude Code folder inside the scratch dir, the file Vault, and the stubs on PATH.
+// The scratch machine most script tests start from: account "fake" active in the desktop app (with
+// its cookie key in place), its Claude Code folder inside the scratch dir, the file Vault, and the
+// fakes.
 export async function world(name = 'world') {
   const dir = await scratch(name);
   const stubs = await makeStubs(dir);
   const support = path.join(dir, 'support');
   await fs.mkdir(path.join(support, 'Claude'), { recursive: true });
+  await stubs.seedKey(path.join(support, 'Claude'));
   await fs.mkdir(path.join(dir, 'state'), { recursive: true });
   await fs.writeFile(path.join(dir, 'state', 'active'), 'fake\n');
   await fs.mkdir(path.join(dir, 'home'), { recursive: true });
   await fs.writeFile(path.join(dir, 'accounts.json'), JSON.stringify([{ id: 'fake', cliConfigDir: path.join(dir, 'claude-fake') }]));
   const env = {
     ...stubs.env,
-    USER: baseEnv().USER,
-    HOME: path.join(dir, 'home'),
+    ...homeEnv(path.join(dir, 'home')),
     SUPPORT_DIR: support,
     SWAP_STATE_DIR: path.join(dir, 'state'),
     SWAP_SKIP_RUNNING_CHECK: '1',

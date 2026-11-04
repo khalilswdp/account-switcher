@@ -19,11 +19,13 @@
 // What goes in (everything that cannot be re-downloaded):
 //   vault/            the two logins (desktop cookie, CLI login) in exactly the format the Vault holds,
 //                     so "restore --to-vault" followed by the dashboard's Load buttons brings an
-//                     account back on any Mac
+//                     account back on any machine, Mac or PC
 //   claude-config/    the Claude Code config folder: conversation history, settings, skills, plugins
-//                     (~/.claude for main, ~/.claude-<name> for the others), without caches
+//                     (~/.claude for main, ~/.claude-<name> for the others), without caches and without
+//                     the login file (that is in vault/)
 //   claude.json       ~/.claude.json, for the default config folder
-//   desktop-data/     the desktop app's data without caches, VM bundles, binaries and the encrypted cookie file
+//   desktop-data/     the desktop app's data without caches, VM bundles, binaries, the cookie file and
+//                     the machine-bound encryption key
 //   manifest.json     what was saved, what was skipped and why
 // A part that cannot be read (for example the desktop app is running on that account) is skipped and
 // listed in the manifest; the rest is still saved.
@@ -36,29 +38,30 @@ import { createReadStream, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from 'node:crypto';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { fail, provider } from './lib/vault-client.mjs';
+import { SUPPORT, appRunning, expandHome, stageLink, tarExe } from './lib/platform.mjs';
+import { activeName } from './lib/desktop.mjs';
 
 const MAGIC = Buffer.from('CSBK');
 const HEADER = 4 + 1 + 16 + 12;
 const TAG = 16;
 const MIN_PASSPHRASE = 12;
-const SCRIPTS = path.dirname(new URL(import.meta.url).pathname);
-const SUPPORT = process.env.SUPPORT_DIR || path.join(os.homedir(), 'Library/Application Support');
-const SWAP_STATE_DIR = process.env.SWAP_STATE_DIR || path.join(os.homedir(), '.claude-desktop-accounts');
+const SCRIPTS = fileURLToPath(new URL('.', import.meta.url));
 const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || 'accounts.json';
-const expand = (p) => (p === '~' ? os.homedir() : p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
 const exists = (p) => fs.access(p).then(() => true, () => false);
 const log = (msg) => process.stderr.write(`${msg}\n`);
 
-// Re-creatable data that is left out of the backup.
-const CONFIG_SKIP = ['cache', 'debug', 'telemetry', 'shell-snapshots', 'session-env', 'downloads', 'statsig', '.DS_Store'];
+// Re-creatable data that is left out of the backup, and the login file (it travels in vault/).
+const CONFIG_SKIP = ['cache', 'debug', 'telemetry', 'shell-snapshots', 'session-env', 'downloads', 'statsig', '.DS_Store', '.credentials.json'];
 const DESKTOP_SKIP = new Set([
   'vm_bundles', 'claude-code', 'claude-code-vm', 'Cache', 'Code Cache', 'GPUCache', 'GraphiteDawnCache',
-  'DawnGraphiteCache', 'DawnWebGPUCache', 'GPUPersistentCache', 'Crashpad', 'Shared Dictionary',
-  'Cookies', 'Cookies-journal', // encrypted with this Mac's key: the login is in vault/ instead
+  'DawnGraphiteCache', 'DawnWebGPUCache', 'GPUPersistentCache', 'Crashpad', 'Shared Dictionary', 'lockfile',
+  'Cookies', 'Cookies-journal', 'Network', // encrypted with this machine's key: the login is in vault/ instead
+  'Local State', // holds that key on Windows: it belongs to this machine and this user
 ]);
 
 // ------------------------------------------------------------------ passphrase
@@ -85,7 +88,7 @@ async function readPassphrase({ confirm }) {
   } else {
     const chunks = [];
     for await (const c of process.stdin) chunks.push(c);
-    pass = Buffer.concat(chunks).toString('utf8').split('\n')[0];
+    pass = Buffer.concat(chunks).toString('utf8').split('\n')[0].replace(/\r$/, '');
   }
   if (confirm && pass.length < MIN_PASSPHRASE) fail(`the passphrase must be at least ${MIN_PASSPHRASE} characters`);
   if (!pass) fail('empty passphrase');
@@ -101,7 +104,7 @@ async function encryptTarTo(file, passphrase, tarArgs) {
   const iv = randomBytes(12);
   const key = await derive(passphrase, salt);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const tar = spawn('tar', tarArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const tar = spawn(tarExe, tarArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let tarErr = '';
   tar.stderr.on('data', (d) => (tarErr += d));
   const exited = new Promise((resolve) => tar.on('close', resolve));
@@ -153,13 +156,13 @@ async function authenticate(file, passphrase) {
 }
 
 function tarFrom(stream, args) {
-  const tar = spawn('tar', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  const tar = spawn(tarExe, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   let out = '';
   let err = '';
   tar.stdout.on('data', (d) => (out += d));
   tar.stderr.on('data', (d) => (err += d));
   stream.pipe(tar.stdin);
-  tar.stdin.on('error', () => {}); // tar may stop reading early (-q): that is fine
+  tar.stdin.on('error', () => {}); // tar may stop reading early: that is fine
   return new Promise((resolve) =>
     tar.on('close', (code) => {
       stream.destroy();
@@ -178,16 +181,8 @@ function configDirOf(name) {
     /* no accounts.json */
   }
   const dir = list.find((x) => x.id === name)?.cliConfigDir ?? (name === 'main' ? null : `~/.claude-${name}`);
-  return dir ? path.resolve(expand(dir)) : path.join(os.homedir(), '.claude');
+  return dir ? path.resolve(expandHome(dir)) : path.join(os.homedir(), '.claude');
 }
-
-const activeName = () => {
-  try {
-    return readFileSync(path.join(SWAP_STATE_DIR, 'active'), 'utf8').trim();
-  } catch {
-    return '';
-  }
-};
 
 // Runs one of the push scripts into a throwaway file "Vault", so the archive holds the logins in the
 // same format the real Vault does. The real Vault and its sync markers are never touched.
@@ -211,7 +206,7 @@ function pushInto(stage, script, name) {
 async function backup(name, toArg, replace = false) {
   if (!/^[\w-]+$/.test(name ?? '')) fail('account name may only use letters, digits, - and _');
   if (!toArg) fail('usage: backup <name> --to <folder>');
-  const folder = path.resolve(expand(toArg));
+  const folder = path.resolve(expandHome(toArg));
   const passphrase = await readPassphrase({ confirm: true });
   const stage = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-backup-'));
   try {
@@ -226,17 +221,26 @@ async function backup(name, toArg, replace = false) {
       log(`  ${part}: ${parts[part].ok ? 'saved' : `skipped (${parts[part].message})`}`);
     }
 
-    // 2. the files that cannot be re-downloaded
+    // 2. the files that cannot be re-downloaded, staged as links for tar to follow (on Windows a
+    //    file the running app holds open cannot even be copied: it is noted and left out)
     const notes = [];
     const members = ['manifest.json', 'README.txt'];
+    const stageIt = async (target, link, what) => {
+      try {
+        await stageLink(target, link);
+        return true;
+      } catch (e) {
+        notes.push(`left out: ${what} (${e.code === 'EBUSY' ? 'in use by the running app' : e.message})`);
+        return false;
+      }
+    };
     if (await exists(path.join(stage, 'vault'))) members.push('vault');
     const configDir = configDirOf(name);
     if (await exists(configDir)) {
-      await fs.symlink(configDir, path.join(stage, 'claude-config'));
-      members.push('claude-config');
-      if (configDir === path.join(os.homedir(), '.claude') && (await exists(path.join(os.homedir(), '.claude.json')))) {
-        await fs.symlink(path.join(os.homedir(), '.claude.json'), path.join(stage, 'claude.json'));
-        members.push('claude.json');
+      if (await stageIt(configDir, path.join(stage, 'claude-config'), configDir)) members.push('claude-config');
+      const home = path.join(os.homedir(), '.claude.json');
+      if (configDir === path.join(os.homedir(), '.claude') && (await exists(home))) {
+        if (await stageIt(home, path.join(stage, 'claude.json'), home)) members.push('claude.json');
       }
     } else {
       notes.push(`no Claude Code config folder at ${configDir}`);
@@ -247,7 +251,7 @@ async function backup(name, toArg, replace = false) {
       await fs.mkdir(path.join(stage, 'desktop-data'));
       for (const entry of await fs.readdir(desktopDir)) {
         if (!DESKTOP_SKIP.has(entry) && !entry.startsWith('Singleton')) {
-          await fs.symlink(path.join(desktopDir, entry), path.join(stage, 'desktop-data', entry));
+          await stageIt(path.join(desktopDir, entry), path.join(stage, 'desktop-data', entry), `app data ${entry}`);
         }
       }
       members.push('desktop-data');
@@ -260,7 +264,7 @@ async function backup(name, toArg, replace = false) {
     let file = path.join(folder, `claude-backup-${name}-${stamp}.csbk`);
     for (let n = 2; await exists(file); n++) file = path.join(folder, `claude-backup-${name}-${stamp}-${n}.csbk`); // never overwrite
     await fs.writeFile(path.join(stage, 'manifest.json'), JSON.stringify({
-      version: 1, account: name, createdAt: new Date().toISOString(), host: os.hostname(),
+      version: 1, account: name, createdAt: new Date().toISOString(), host: os.hostname(), platform: process.platform,
       logins: Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, v.ok ? 'saved' : `skipped: ${v.message}`])),
       configFolder: configDir, desktopFolder: desktopDir, notes,
     }, null, 2));
@@ -271,7 +275,7 @@ async function backup(name, toArg, replace = false) {
       '  node scripts/backup.mjs restore <this file> --out <new folder> --to-vault',
       '',
       'The vault/ folder holds the logins in the Vault format. After "restore --to-vault",',
-      'use the dashboard\'s "From the Vault" buttons to load them onto a Mac.',
+      'use the dashboard\'s "Load from Vault" buttons to load them onto a computer.',
       'claude-config/ is the Claude Code folder (history, settings, skills, plugins).',
     ].join('\n'));
 
@@ -302,7 +306,7 @@ async function backup(name, toArg, replace = false) {
       ok: true, file, bytes: size, replaced, logins: Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, v.ok ? 'saved' : `skipped: ${v.message}`])), notes,
     }));
   } finally {
-    await fs.rm(stage, { recursive: true, force: true }); // symlinks are removed, never followed
+    await fs.rm(stage, { recursive: true, force: true }); // links and junctions are removed, never followed
   }
 }
 
@@ -317,7 +321,7 @@ async function verify(file) {
     decryptedStream(file, passphrase).then((s) => tarFrom(s, ['-tzf', '-'])),
     decryptedStream(file, passphrase).then((s) => tarFrom(s, ['-xzOf', '-', 'manifest.json'])),
   ]);
-  const names = list.out.split('\n').filter(Boolean);
+  const names = list.out.split(/\r?\n/).filter(Boolean); // Windows' tar ends lines with CRLF
   const top = {};
   for (const n of names) top[n.split('/')[0]] = (top[n.split('/')[0]] ?? 0) + 1;
   console.log('The backup opens and is intact.');
@@ -335,7 +339,7 @@ async function verify(file) {
 async function restore(file, outArg, toVault, force) {
   if (!file || !outArg) fail('usage: restore <file> --out <folder> [--to-vault] [--force]');
   if (!(await exists(file))) fail(`no such file: ${file}`);
-  const out = path.resolve(expand(outArg));
+  const out = path.resolve(expandHome(outArg));
   if ((await exists(out)) && (await fs.readdir(out)).length) fail(`${out} is not empty, refusing to unpack into it`);
   const passphrase = await readPassphrase({ confirm: false });
   await authenticate(file, passphrase); // nothing is written until the file is known to be intact
@@ -346,7 +350,7 @@ async function restore(file, outArg, toVault, force) {
 
   if (toVault) {
     const { written } = await putVault(path.join(out, 'vault'), force, (line) => console.log(`  ${line}`));
-    console.log(`${written} login(s) written to the Vault. Use the dashboard's "From the Vault" buttons to load them.`);
+    console.log(`${written} login(s) written to the Vault. Use the dashboard's "Load from Vault" buttons to load them.`);
   }
 }
 
@@ -401,9 +405,6 @@ async function copyMissing(src, dst) {
   return r;
 }
 
-const appRunning = () =>
-  !process.env.SWAP_SKIP_RUNNING_CHECK && spawnSync('pgrep', ['-f', '/Applications/Claude.app/Contents/']).status === 0;
-
 // Opens a backup and describes it as one line of JSON (no secret values), for the dashboard.
 async function inspect(file) {
   if (!file) fail('usage: inspect <file>');
@@ -411,8 +412,8 @@ async function inspect(file) {
   const passphrase = await readPassphrase({ confirm: false });
   await authenticate(file, passphrase);
   const list = await tarFrom(await decryptedStream(file, passphrase), ['-tzf', '-']);
-  const names = list.out.split('\n').filter(Boolean);
-  const manifest = await tarFrom(await decryptedStream(file, passphrase), ['-xzOqf', '-', 'manifest.json']);
+  const names = list.out.split(/\r?\n/).filter(Boolean); // Windows' tar ends lines with CRLF
+  const manifest = await tarFrom(await decryptedStream(file, passphrase), ['-xzOf', '-', 'manifest.json']);
   let m;
   try {
     m = JSON.parse(manifest.out);
@@ -455,7 +456,7 @@ async function apply(file, partsArg, replaceVault) {
 
     const result = {};
     if (parts.has('desktop')) { // check before writing anything
-      if (activeName() === name && appRunning()) fail('the Claude app is running on this account. Quit it (Cmd+Q) and try again.');
+      if (activeName() === name && (await appRunning())) fail('the Claude app is running on this account. Quit it and try again.');
     }
     if (parts.has('vault')) result.vault = await putVault(path.join(stage, 'vault'), replaceVault);
     if (parts.has('config')) {

@@ -25,6 +25,14 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+// Optional settings file in the project folder (gitignored): VAULT_PORT, VAULT_LOCAL_DIR, VAULT_IMAGE.
+// Real environment variables win over it.
+try {
+  process.loadEnvFile(new URL('../.env', import.meta.url));
+} catch {
+  /* no .env: the defaults apply */
+}
+
 const run = promisify(execFile);
 
 const LOCAL_DIR = process.env.VAULT_LOCAL_DIR || path.join(os.homedir(), '.claude-switcher-vault');
@@ -117,7 +125,19 @@ async function ok(res, what) {
 async function unsealWith(key) {
   const res = await api('PUT', 'sys/unseal', { json: { key } });
   await ok(res, 'unseal');
-  return (await res.json()).sealed === false;
+  const unsealed = (await res.json()).sealed === false;
+  if (unsealed) await waitUntilActive();
+  return unsealed;
+}
+
+// Right after an unseal the raft node is not yet the active node, and a write then fails (HTTP 500).
+async function waitUntilActive() {
+  for (let i = 0; i < 30; i++) {
+    const h = await health();
+    if (h.initialized && !h.sealed && !h.standby) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  fail('Vault is unsealed but not active yet; try again in a moment');
 }
 
 // The Vault keeps a new version of an entry on every write. Old versions of a login cookie

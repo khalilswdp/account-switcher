@@ -7,13 +7,14 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import {
+  OS, SUPPORT, cookieFileLockedWhileRunning, desktopSupported, expandHome, folderBytes, insideDesktopApp, isMac, isWindows,
+  openApp, openTerminal, pickPath as nativePick, quitApp,
+} from '../scripts/lib/platform.mjs';
+import { init as initSwap, listState, newAccount as newSwap, use as useSwap } from '../scripts/lib/desktop.mjs';
 
-// Optional settings file in the project folder (gitignored); real environment variables win.
-try {
-  process.loadEnvFile(new URL('../.env', import.meta.url));
-} catch {
-  /* no .env: the defaults apply */
-}
+// The optional settings file (.env, gitignored) is loaded by scripts/lib/platform.mjs on import;
+// real environment variables win over it.
 
 const run = promisify(execFile);
 
@@ -23,11 +24,12 @@ const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || 'accounts.json';
 const LOCAL_ACCOUNTS_FILE = process.env.LOCAL_ACCOUNTS_FILE || '.accounts.local.json';
 
 // Two surfaces per account: the Claude desktop app (its data folder is renamed into place by
-// scripts/desktop-swap.sh) and Claude Code (its own config folder and Keychain login).
+// scripts/lib/desktop.mjs) and Claude Code (its own config folder and login).
+const absoluteOrHome = (p) => /^~[\\/]/.test(p) || path.isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p);
 function makeAccount(id, label, cliConfigDir) {
   if (!/^[\w-]+$/.test(id ?? '') || id === '__proto__') throw new Error(`Invalid account id: ${id}`);
-  if (cliConfigDir != null && !/^(~\/|\/)[\w./-]+$/.test(cliConfigDir)) {
-    throw new Error(`Invalid cliConfigDir for ${id}: use an absolute or ~/ path without spaces or quotes`);
+  if (cliConfigDir != null && (typeof cliConfigDir !== 'string' || !absoluteOrHome(cliConfigDir) || /["'\r\n]/.test(cliConfigDir))) {
+    throw new Error(`Invalid cliConfigDir for ${id}: use an absolute path or one starting with ~/, without quotes`);
   }
   return {
     label: label || id,
@@ -65,8 +67,8 @@ function loadAccounts() {
 }
 const ACCOUNTS = loadAccounts();
 
-// Makes an account local: one that exists in the Vault but not on this Mac, or a new one made on
-// the page. It gets a card; its folders are created as its parts are signed in or loaded.
+// Makes an account local: one that exists in the Vault but not on this machine, or a new one made
+// on the page. It gets a card; its folders are created as its parts are signed in or loaded.
 // Remembered in the local accounts file.
 async function registerAccount(id, label = '') {
   if (ACCOUNTS[id]) return;
@@ -77,20 +79,19 @@ async function registerAccount(id, label = '') {
 }
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
-const expandHome = (p) => (p === '~' ? os.homedir() : p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
 const exists = (p) => fs.access(p).then(() => true, () => false);
 
 // Protected accounts (PROTECTED_ACCOUNTS in .env, default "main"): switched to, saved to the Vault
-// and backed up like any other, but never removed from this Mac, and nothing of theirs is ever
-// deleted from this page. Loading their own Vault entry back onto them is allowed; there is no way
-// to load another account's entry onto any account.
+// and backed up like any other, but never removed from this machine, and nothing of theirs is
+// ever deleted from this page. Loading their own Vault entry back onto them is allowed; there is
+// no way to load another account's entry onto any account.
 const PROTECTED = new Set((process.env.PROTECTED_ACCOUNTS ?? 'main').split(',').map((s) => s.trim()).filter(Boolean));
 function guardProtected(id) {
   if (PROTECTED.has(id)) throw httpError(403, `"${id}" is a protected account: it cannot be removed or deleted from (PROTECTED_ACCOUNTS in .env)`);
 }
 
-// Forgets an account on this Mac: its card goes, in whichever file listed it. Nothing of its data is
-// deleted (app data folder, Claude Code folder, Keychain login, Vault entries), so it can be added
+// Forgets an account on this machine: its card goes, in whichever file listed it. Nothing of its
+// data is deleted (app data folder, Claude Code folder, login, Vault entries), so it can be added
 // back any time. Refused while the Claude app is on it.
 async function forgetAccount(id) {
   guardProtected(id);
@@ -110,79 +111,63 @@ async function forgetAccount(id) {
 
 // ------------------------------------------------- Claude Code (CLI) launcher
 
-// Each account keeps its own Claude Code login: a separate config folder, with its own
-// Keychain item. Nothing is swapped, so opening one account never touches the other.
-// The command comes from accounts.json only, never from the request.
+// Each account keeps its own Claude Code login: a separate config folder, with its own login
+// (Keychain item on macOS, credentials file elsewhere). Nothing is swapped, so opening one account
+// never touches the other. The folder comes from accounts.json only, never from the request.
 const CLI_WORKDIR = process.env.CLI_WORKDIR || os.homedir();
-const shQuote = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
-const asQuote = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-
-function cliCommand(id) {
-  const dir = ACCOUNTS[id].cliConfigDir?.replace(/^~\//, '$HOME/');
-  const env = dir ? `CLAUDE_CONFIG_DIR=${dir} CLAUDE_SECURESTORAGE_CONFIG_DIR=${dir} ` : '';
-  return `cd ${shQuote(CLI_WORKDIR)} && ${env}claude`;
-}
 
 async function openCli(id) {
-  if (process.platform !== 'darwin') throw httpError(501, 'Opening Terminal is only supported on macOS');
-  const command = cliCommand(id);
+  const dir = ACCOUNTS[id].cliConfigDir ? path.resolve(expandHome(ACCOUNTS[id].cliConfigDir)) : null;
   try {
-    await run('osascript', [
-      '-e',
-      `tell application "Terminal"\nactivate\ndo script "${asQuote(command)}"\nend tell`,
-    ]);
+    return { ok: true, ...(await openTerminal({ id, configDir: dir, cwd: CLI_WORKDIR })) };
   } catch (e) {
-    // First use may need Automation permission (System Settings > Privacy & Security).
-    throw httpError(500, `Could not open Terminal (${e.message.split('\n')[0]}). Run this yourself: ${command}`);
+    throw httpError(/not supported/.test(e.message) ? 501 : 500, e.message);
   }
-  return { ok: true, command };
 }
 
 // ------------------------------------------------- Claude desktop app switcher
 
-// Switching renames the app's data folder (see scripts/desktop-swap.sh): nothing is
-// copied or deleted. The app has to be quit first, so the dashboard must not be running
-// inside the desktop app itself.
-const SWAP_SCRIPT = fileURLToPath(new URL('../scripts/desktop-swap.sh', import.meta.url));
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const failText = (e) => (e.stderr || e.message || '').toString().trim().split('\n')[0];
+// Switching renames the app's data folder (see scripts/lib/desktop.mjs): nothing is copied or
+// deleted. The app has to be quit first, so the dashboard must not be running inside the desktop
+// app itself. A switch never runs while a Vault save, load, backup or restore reads the folders
+// (they would read the wrong account's data after the rename), and those never start mid-switch.
 let switching = false;
+let vaulting = false;
+const notWhileVaulting = () => {
+  if (vaulting) throw httpError(409, 'A Vault save, load, backup or restore is in progress: wait for it to finish');
+};
+const notWhileSwitching = () => {
+  if (switching) throw httpError(409, 'A desktop switch is in progress: wait for it to finish');
+};
 
 async function desktopState() {
-  if (process.platform !== 'darwin') return { supported: false };
-  const { stdout } = await run('bash', [SWAP_SCRIPT, 'list']);
-  const state = { supported: true, active: null, parked: [], running: false };
-  for (const line of stdout.trim().split('\n')) {
-    const sp = line.indexOf(' ');
-    const [key, value] = sp < 0 ? [line, ''] : [line.slice(0, sp), line.slice(sp + 1)];
-    if (key === 'active' && value !== '-') state.active = value;
-    else if (key === 'parked') state.parked.push(value);
-    else if (key === 'running') state.running = value === 'yes';
-  }
-  return state;
+  if (!desktopSupported) return { supported: false };
+  return { supported: true, ...(await listState()) };
 }
 
 // Switching and loading both quit the app, so the dashboard must not run inside it.
-function guardDesktopApp() {
-  if (process.platform !== 'darwin') throw httpError(501, 'The desktop switcher is only supported on macOS');
-  if (process.env.__CFBundleIdentifier === 'com.anthropic.claudefordesktop') {
-    throw httpError(409, 'The dashboard is running inside the Claude desktop app, which this would quit. Start it from Terminal.app.');
+async function guardDesktopApp() {
+  if (!desktopSupported) throw httpError(501, 'The desktop switcher is only supported on macOS and Windows');
+  if (await insideDesktopApp()) {
+    throw httpError(409, 'The dashboard is running inside the Claude desktop app, which this would quit. Start it from a terminal of your own.');
   }
 }
 
 async function quitDesktopApp() {
-  await run('osascript', ['-e', 'tell application "Claude" to quit']).catch(() => {});
-  for (let i = 0; i < 40 && (await desktopState()).running; i++) await sleep(500); // up to 20 s
-  if ((await desktopState()).running) {
-    throw httpError(409, 'Claude did not quit (an unsaved change or a dialog?). Quit it yourself and try again.');
+  try {
+    await quitApp();
+  } catch (e) {
+    throw httpError(409, e.message);
   }
 }
 
-const openDesktopApp = () => run('open', ['-a', 'Claude']).catch(() => {});
+const openDesktopApp = () => openApp().catch(() => {});
+const swapError = (e) => httpError(500, e.message);
 
 async function switchDesktop(name) {
-  guardDesktopApp();
+  await guardDesktopApp();
   if (switching) throw httpError(409, 'A desktop switch is already in progress');
+  notWhileVaulting();
   switching = true;
   try {
     const state = await desktopState();
@@ -192,9 +177,9 @@ async function switchDesktop(name) {
 
     if (state.running) await quitDesktopApp();
     try {
-      await run('bash', [SWAP_SCRIPT, 'use', name]);
+      await useSwap(name);
     } catch (e) {
-      throw httpError(500, failText(e));
+      throw swapError(e);
     }
     if (state.running) await openDesktopApp(); // reopen only if it was open
     return { ok: true, active: name, relaunched: state.running };
@@ -205,13 +190,14 @@ async function switchDesktop(name) {
 
 // First run: the app's current data folder becomes account <id>. Nothing is moved.
 async function initDesktop(id) {
-  guardDesktopApp();
+  await guardDesktopApp();
+  notWhileVaulting();
   const state = await desktopState();
   if (state.active) throw httpError(409, `Already set up: the Claude app is on "${state.active}"`);
   try {
-    await run('bash', [SWAP_SCRIPT, 'init', id]);
+    await initSwap(id);
   } catch (e) {
-    throw httpError(500, failText(e));
+    throw swapError(e);
   }
   return { ok: true, active: id };
 }
@@ -220,8 +206,9 @@ async function initDesktop(id) {
 // account's name and the app is reopened empty, showing its sign-in page. The person signs in
 // as <id>; from then on that folder is account <id>.
 async function newDesktopAccount(id) {
-  guardDesktopApp();
+  await guardDesktopApp();
   if (switching) throw httpError(409, 'A desktop switch is already in progress');
+  notWhileVaulting();
   switching = true;
   try {
     const state = await desktopState();
@@ -230,10 +217,10 @@ async function newDesktopAccount(id) {
     if (state.parked.includes(id)) throw httpError(409, 'This account already has app data: switch to it instead');
     if (state.running) await quitDesktopApp();
     try {
-      await run('bash', [SWAP_SCRIPT, 'new', id]);
+      await newSwap(id);
     } catch (e) {
       if (state.running) await openDesktopApp();
-      throw httpError(500, failText(e));
+      throw swapError(e);
     }
     await openDesktopApp(); // opens signed out, ready for the sign-in
     return { ok: true, active: id, parked: state.active };
@@ -247,7 +234,6 @@ async function newDesktopAccount(id) {
 // The two scripts do the work and never print secret values, so only their first output line is
 // passed on.
 const PROJECT_DIR = fileURLToPath(new URL('..', import.meta.url));
-let vaulting = false;
 
 async function runScript(script, args) {
   try {
@@ -257,7 +243,7 @@ async function runScript(script, args) {
     });
     return { ok: true, message: stdout.trim().split('\n')[0] };
   } catch (e) {
-    if (e.killed) return { ok: false, message: 'timed out (did you click Allow on the Keychain prompt?)' };
+    if (e.killed) return { ok: false, message: `timed out${isMac ? ' (did you click Allow on the Keychain prompt?)' : ''}` };
     const line = (e.stderr || e.stdout || e.message || '').toString().trim().split('\n')[0];
     return { ok: false, message: line.replace(/^Error:\s*/, '') };
   }
@@ -266,19 +252,38 @@ async function runScript(script, args) {
 const PARTS = ['desktop', 'cli'];
 
 // parts: which of the two to save. The dashboard saves one at a time; no parts means both.
-// force: replace a Vault copy that was saved from another Mac since this one last synced (the
+// force: replace a Vault copy that was saved from another machine since this one last synced (the
 // scripts refuse that by default; the dashboard asks first, then retries with force).
 async function saveToVault(id, parts = PARTS, force = false) {
   if (vaulting) throw httpError(409, 'A Vault save is already in progress');
+  notWhileSwitching();
   vaulting = true;
   const args = force ? ['push', id, '--force'] : ['push', id];
   try {
     const out = {};
-    if (parts.includes('desktop')) out.desktop = await runScript('desktop-vault.mjs', args); // may show the Keychain prompt
+    if (parts.includes('desktop')) out.desktop = await saveDesktop(id, args); // may show the Keychain prompt
     if (parts.includes('cli')) out.cli = await runScript('cli-vault.mjs', args); // may show the Keychain prompt
     return out;
   } finally {
     vaulting = false;
+  }
+}
+
+// On Windows the running app keeps its cookie file locked, so saving the account the app is on
+// means quitting the app first and reopening it after (the page says so before asking).
+async function saveDesktop(id, args) {
+  const state = await desktopState();
+  if (!(cookieFileLockedWhileRunning && state.supported && state.active === id && state.running)) return runScript('desktop-vault.mjs', args);
+  await guardDesktopApp();
+  if (switching) throw httpError(409, 'A desktop switch is already in progress');
+  switching = true;
+  try {
+    await quitDesktopApp();
+    const r = await runScript('desktop-vault.mjs', args);
+    await openDesktopApp();
+    return r;
+  } finally {
+    switching = false;
   }
 }
 
@@ -291,7 +296,7 @@ async function saveToVault(id, parts = PARTS, force = false) {
 // then make that account the one the Claude app opens. The app has to be quit for this, and is
 // reopened afterwards if it was open.
 async function loadDesktop(id) {
-  guardDesktopApp();
+  await guardDesktopApp();
   if (switching) throw httpError(409, 'A desktop switch is already in progress');
   switching = true;
   try {
@@ -307,11 +312,11 @@ async function loadDesktop(id) {
     let note = '';
     if (id !== state.active) {
       try {
-        await run('bash', [SWAP_SCRIPT, 'use', id]);
+        await useSwap(id);
         note = ` The Claude app now opens "${id}".`;
       } catch (e) {
         if (state.running) await openDesktopApp();
-        throw httpError(500, failText(e));
+        throw swapError(e);
       }
     }
     if (state.running) await openDesktopApp();
@@ -321,12 +326,12 @@ async function loadDesktop(id) {
   }
 }
 
-// CLI: replace this Mac's Claude Code login for the account, then open Terminal as it.
+// CLI: replace this machine's Claude Code login for the account, then open a terminal as it.
 async function loadCli(id) {
   const r = await runScript('cli-vault.mjs', ['pull', id, '--replace']); // may show the Keychain prompt
   if (!r.ok) throw httpError(500, r.message);
   await openCli(id);
-  return { ok: true, message: `${r.message} Opened Terminal as this account.` };
+  return { ok: true, message: `${r.message} Opened a terminal as this account.` };
 }
 
 const LOADERS = { desktop: loadDesktop, cli: loadCli };
@@ -382,6 +387,7 @@ async function backupAccount(id, folder, passphrase, replace = false) {
 async function runBackupTool(args, passphrase) {
   if (typeof passphrase !== 'string' || !passphrase) throw httpError(400, 'enter the passphrase');
   if (vaulting) throw httpError(409, 'A Vault save, load, backup or restore is already in progress');
+  notWhileSwitching();
   vaulting = true;
   try {
     const r = await runWithStdin('backup.mjs', args, `${passphrase}\n`, 15 * 60_000);
@@ -395,20 +401,16 @@ async function runBackupTool(args, passphrase) {
   }
 }
 
-// A native macOS folder or file chooser, so a path never has to be typed. The prompts are fixed here.
+// A native folder or file chooser, so a path never has to be typed. The prompts are fixed in
+// scripts/lib/platform.mjs. A picked file also comes with its folder, for the page.
 async function pickPath(kind) {
-  if (process.platform !== 'darwin') throw httpError(501, 'The picker is only available on macOS');
-  const choose = kind === 'folder'
-    ? 'choose folder with prompt "Choose the folder for the backups"'
-    : 'choose file with prompt "Choose a Claude backup (a .csbk file)"';
+  let r;
   try {
-    // "activate" brings the chooser in front of the browser window
-    const { stdout } = await run('osascript', ['-e', `tell current application\nactivate\nreturn POSIX path of (${choose})\nend tell`], { timeout: 300_000 });
-    return { path: stdout.trim().replace(/(.)\/$/, '$1') };
+    r = await nativePick(kind);
   } catch (e) {
-    if (/-128|cancel/i.test(e.stderr || '')) return { canceled: true };
-    throw httpError(500, 'could not open the file chooser');
+    throw httpError(/not available/.test(e.message) ? 501 : 500, e.message);
   }
+  return r.canceled || kind !== 'file' ? r : { ...r, folder: path.dirname(r.path), name: path.basename(r.path) };
 }
 
 // Backup files in a folder: names, sizes and times only. With an account, only that account's.
@@ -440,17 +442,9 @@ const backupFile = (file) => {
 
 // ------------------------------------------------- Deleting an account's data
 
-// What an account holds, for the removal dialog: its Vault entries, what is on this Mac (with
+// What an account holds, for the removal dialog: its Vault entries, what is on this machine (with
 // sizes), and its backup files in the folder the page remembers. Names, sizes and times only.
-const SUPPORT = process.env.SUPPORT_DIR || path.join(os.homedir(), 'Library/Application Support');
 const cliDirOf = (id) => expandHome(ACCOUNTS[id].cliConfigDir ?? '~/.claude');
-const duBytes = async (dir) => {
-  try {
-    return Number((await run('du', ['-sk', dir])).stdout.split('\t')[0]) * 1024;
-  } catch {
-    return null;
-  }
-};
 
 async function holdings(id, backupFolder) {
   const desktop = await desktopState();
@@ -459,11 +453,11 @@ async function holdings(id, backupFolder) {
   const cliDir = cliDirOf(id);
   return {
     vault,
-    mac: {
+    local: {
       appActive: Boolean(desktop.supported && desktop.active === id),
-      appData: appDir && (await exists(appDir)) ? { path: appDir, bytes: await duBytes(appDir) } : null,
-      cliFolder: (await exists(cliDir)) ? { path: cliDir, bytes: await duBytes(cliDir) } : null,
-      keychain: vault.cli.local ?? null,
+      appData: appDir && (await exists(appDir)) ? { path: appDir, bytes: await folderBytes(appDir) } : null,
+      cliFolder: (await exists(cliDir)) ? { path: cliDir, bytes: await folderBytes(cliDir) } : null,
+      keychain: vault.cli.local ?? null, // the Claude Code login on this machine (whatever store holds it)
     },
     backups: backupFolder ? await listBackups(backupFolder, id).catch(() => null) : null,
     passphraseSet: await passphraseSet(),
@@ -500,12 +494,16 @@ async function setPassphrase(current, next) {
   await fs.writeFile(PASS_FILE, `scrypt$${salt.toString('hex')}$${hash.toString('hex')}\n`, { mode: 0o600 });
 }
 
-// Never the home folder, anything above it, or a path too short to be an account's own.
+// Never the home folder, anything above it, or a path too short to be an account's own (fewer than
+// two folders below the root, the drive letter not counting on Windows).
 function guardDeletable(dir) {
-  const home = os.homedir();
-  if (dir === home || home.startsWith(`${dir}/`) || dir.split('/').filter(Boolean).length < 2) {
-    throw new Error(`refusing to delete ${dir}`);
-  }
+  const target = path.resolve(dir);
+  const home = path.resolve(os.homedir());
+  const same = (a, b) => (isWindows ? a.toLowerCase() === b.toLowerCase() : a === b);
+  const rel = path.relative(target, home); // '' for home itself; inside target when it has no '..'
+  const aboveHome = same(target, home) || (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel));
+  const depth = path.relative(path.parse(target).root, target).split(/[\\/]/).filter(Boolean).length;
+  if (aboveHome || depth < 2) throw new Error(`refusing to delete ${dir}`);
 }
 
 // Deletes what was ticked, each item on its own so one failure does not stop the rest, then forgets
@@ -577,8 +575,8 @@ async function deleteAccountData(id, { confirm, passphrase, targets = {}, backup
 
 const app = express();
 
-// Only this Mac's own browser may talk to the server. The Host check stops DNS rebinding (a web
-// page on some-site.com whose name is pointed at 127.0.0.1); the Origin check stops cross-site
+// Only this machine's own browser may talk to the server. The Host check stops DNS rebinding (a
+// web page on some-site.com whose name is pointed at 127.0.0.1); the Origin check stops cross-site
 // POSTs. Both matter: a POST here can quit the Claude app or read a login.
 const BUILD = new Date().toISOString(); // the page reloads itself when this changes (server restarted)
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
@@ -610,9 +608,9 @@ app.param('id', (req, res, next, id) =>
   Object.hasOwn(ACCOUNTS, id) ? next() : res.status(404).json({ error: `Unknown account ${id}` }),
 );
 
-// Each account with what it has on this Mac that the page cannot see otherwise: app data (the active
-// or a parked folder) and a Claude Code folder. The Keychain login and the Vault entries come with
-// the per-account Vault status.
+// Each account with what it has on this machine that the page cannot see otherwise: app data
+// (the active or a parked folder) and a Claude Code folder. The login and the Vault entries come
+// with the per-account Vault status.
 async function accountList(desktop = null) {
   return Promise.all(Object.entries(ACCOUNTS).map(async ([id, a]) => ({
     id,
@@ -626,17 +624,19 @@ async function accountList(desktop = null) {
   })));
 }
 app.get('/api/accounts', async (req, res) => res.json(await accountList(await desktopState())));
-// Everything the page polls, in one answer.
+// Everything the page polls, in one answer. "platform" lets the page use this system's words
+// (this Mac / this PC, Keychain / credentials file); "saveQuits" says a desktop save of the active
+// account quits the app (Windows).
 app.get('/api/state', async (req, res) => {
   const desktop = await desktopState();
-  res.json({ build: BUILD, accounts: await accountList(desktop), desktop: { ...desktop, switching } });
+  res.json({ build: BUILD, platform: OS, accounts: await accountList(desktop), desktop: { ...desktop, switching, saveQuits: cookieFileLockedWhileRunning } });
 });
 
 // A new account made on the page. Nothing is signed in yet; the card's rows take it from there.
 app.post('/api/accounts', express.json({ limit: '4kb' }), async (req, res) => {
   const id = String(req.body?.id ?? '').trim();
   if (!/^[\w-]{1,40}$/.test(id) || id === '__proto__') throw httpError(400, 'the short name may only use letters, digits, - and _');
-  if (ACCOUNTS[id]) throw httpError(409, `"${id}" already exists on this Mac`);
+  if (ACCOUNTS[id]) throw httpError(409, `"${id}" already exists on this machine`);
   await registerAccount(id, String(req.body?.label ?? ''));
   res.json({ ok: true, account: id, label: ACCOUNTS[id].label });
 });
@@ -672,6 +672,7 @@ async function loadPart(id, part) {
   const load = LOADERS[part];
   if (!load) throw httpError(400, `part must be one of ${Object.keys(LOADERS).join(', ')}`);
   if (vaulting) throw httpError(409, 'A Vault save or load is already in progress');
+  notWhileSwitching();
   vaulting = true;
   try {
     return await load(id);
@@ -691,7 +692,7 @@ async function vaultAccounts() {
 }
 app.get('/api/vault/accounts', async (req, res) => res.json(await vaultAccounts()));
 
-// Give an account that exists only in the Vault a card on this Mac, so its parts can be loaded.
+// Give an account that exists only in the Vault a card on this machine, so its parts can be loaded.
 app.post('/api/vault/add', express.json({ limit: '4kb' }), async (req, res) => {
   const id = String(req.query.account ?? '');
   if (!/^[\w-]+$/.test(id)) throw httpError(400, 'invalid account name');

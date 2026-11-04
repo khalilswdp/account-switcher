@@ -115,7 +115,7 @@
     <h1>Claude accounts</h1>
     <p class="lede">
       Switch the Claude app and Claude Code between your accounts without signing in again.
-      Each login can be saved to your private Vault, so another Mac can load it.
+      Each login can be saved to your private Vault, so another computer, Mac or PC, can load it.
     </p>
   </header>
 
@@ -134,16 +134,16 @@
   </section>
 
   <section id="vault-only" class="panel" hidden>
-    <h2>In the Vault, not on this Mac yet</h2>
-    <p class="muted">"Add to this Mac" gives the account a card here. Its "Load from Vault" buttons then bring each login onto this Mac.</p>
+    <h2>In the Vault, not on <span data-w="here">this computer</span> yet</h2>
+    <p class="muted">"Add to <span data-w="here">this computer</span>" gives the account a card here. Its "Load from Vault" buttons then bring each login onto <span data-w="here">this computer</span>.</p>
     <div id="vault-only-list"></div>
   </section>
 
   <div id="cards" class="cards"></div>
 
   <section id="empty" class="panel" style="margin-top: 1rem;" hidden>
-    <h2>No accounts on this Mac yet</h2>
-    <p class="muted">Use "Add an account…" above, or "Add to this Mac" on an account from the Vault.</p>
+    <h2>No accounts on <span data-w="here">this computer</span> yet</h2>
+    <p class="muted">Use "Add an account…" above, or "Add to <span data-w="here">this computer</span>" on an account from the Vault.</p>
   </section>
 
   <section class="log">
@@ -157,10 +157,10 @@
   <details class="help">
     <summary>How this works</summary>
     <ul>
-      <li><b>Claude app</b>: each account has its own app data on this Mac. Switching quits the app, swaps which data it uses, and reopens it. Nothing is copied or deleted.</li>
-      <li><b>Claude Code</b>: each account has its own Claude Code folder and login on this Mac. "Open in Terminal" starts Claude Code as that account.</li>
-      <li><b>Vault</b>: "Save to Vault" puts one login in your private Vault; "Load from Vault" brings that same account's login back onto this Mac. No account can load another account's login.</li>
-      <li><b>Protected accounts</b> (PROTECTED_ACCOUNTS in .env, "main" by default): switched to, saved and backed up like any other, but never removed from this Mac, and nothing of theirs can be deleted here.</li>
+      <li><b>Claude app</b>: each account has its own app data on <span data-w="here">this computer</span>. Switching quits the app, swaps which data it uses, and reopens it. Nothing is copied or deleted.</li>
+      <li><b>Claude Code</b>: each account has its own Claude Code folder and login on <span data-w="here">this computer</span>. "Open in Terminal" starts Claude Code as that account.</li>
+      <li><b>Vault</b>: "Save to Vault" puts one login in your private Vault; "Load from Vault" brings that same account's login back onto <span data-w="here">this computer</span>. No account can load another account's login.</li>
+      <li><b>Protected accounts</b> (PROTECTED_ACCOUNTS in .env, "main" by default): switched to, saved and backed up like any other, but never removed from <span data-w="here">this computer</span>, and nothing of theirs can be deleted here.</li>
       <li><b>Backup</b>: one encrypted file with the account's two logins and what cannot be re-downloaded (Claude Code history, settings, the app's data). Restoring only adds what is missing.</li>
     </ul>
   </details>
@@ -251,7 +251,7 @@
     <p class="muted">
       One encrypted file with the account's two logins and what cannot be re-downloaded: Claude Code history,
       settings, skills and plugins, and the Claude app's data. <strong>Without the passphrase the file cannot be
-      opened, and there is no way to recover it.</strong> Store the file somewhere other than this Mac's disk.
+      opened, and there is no way to recover it.</strong> Store the file somewhere other than <span data-w="here">this computer</span>'s disk.
     </p>
     <label class="field">Folder to save it in
       <span class="control">
@@ -329,15 +329,26 @@ const button = (text, cls, onClick, { disabled = false, title = '' } = {}) => {
   return b;
 };
 const when = (d) => new Date(d).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-// The Keychain's "20261104144455Z" style timestamp as a Date
-const keychainTime = (s) => {
+// The login store's "20261104144455Z" style timestamp (the Keychain's format, used on every system) as a Date
+const loginTime = (s) => {
   const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/.exec(s ?? '');
   return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6])) : null;
 };
 
 const PARTS = [['desktop', 'Claude app'], ['cli', 'Claude Code']];
 const PART_NAME = Object.fromEntries(PARTS);
-const KEYCHAIN = 'macOS will ask to allow Keychain access: click Allow (not "Always Allow").';
+// Words that differ by system, chosen from the "platform" the server reports: what this machine is
+// called, where the Claude Code login lives, and the macOS Keychain prompt (nothing of the kind elsewhere).
+const WORDS = {
+  darwin: { here: 'this Mac', store: "this Mac's Keychain", allow: 'macOS will ask to allow Keychain access: click Allow (not "Always Allow").', allowShort: ' Click Allow if macOS asks.' },
+  win32: { here: 'this PC', store: 'its Claude Code folder (.credentials.json)', allow: '', allowShort: '' },
+  other: { here: 'this computer', store: 'its Claude Code folder (.credentials.json)', allow: '', allowShort: '' },
+};
+const W = () => WORDS[state.platform] ?? WORDS.other;
+// The static texts marked data-w take this system's word once the platform is known.
+function fillWords() {
+  for (const el of document.querySelectorAll('[data-w]')) el.textContent = W()[el.dataset.w];
+}
 
 // ------------------------------------------------------------------ server access
 
@@ -375,7 +386,7 @@ $('#log-clear').addEventListener('click', () => $('#log-box').replaceChildren())
 
 // ------------------------------------------------------------------- state
 
-const state = { accounts: [], desktop: null };
+const state = { accounts: [], desktop: null, platform: null };
 const vaultInfo = {}; // id -> { desktop, cli } from the Vault helpers, or null while loading
 let vaultList = null; // { accounts } from the Vault listing, or { accounts: {}, error }
 const busy = {}; // id -> what is running for that account right now
@@ -397,14 +408,14 @@ function render(force = false) {
 function renderOverview() {
   const d = state.desktop;
   const items = [];
-  if (d && !d.supported) items.push(['Claude app', 'only on macOS', 'muted']);
+  if (d && !d.supported) items.push(['Claude app', 'not available on this system', 'muted']);
   else if (d?.active) items.push(['Claude app', `on "${labelOf(d.active)}"${d.running ? ', running' : ', not running'}`, 'ok']);
   else if (d) items.push(['Claude app', 'not set up yet', 'warn']);
   if (vaultList?.error) items.push(['Vault', vaultList.error, 'warn']);
   else if (vaultList) {
     const all = Object.values(vaultList.accounts);
     const away = all.filter((e) => !e.local).length;
-    const where = away ? `${away} not on this Mac yet (listed below)` : 'all on this Mac';
+    const where = away ? `${away} not on ${W().here} yet (listed below)` : `all on ${W().here}`;
     items.push(['Vault', all.length ? `${all.length} account${all.length > 1 ? 's' : ''} saved, ${where}` : 'empty so far', '']);
     if (vaultList.unreadable?.length) {
       items.push(['Vault entries that could not be read', `${vaultList.unreadable.join(', ')} (each entry is one field "envelope" holding the JSON the scripts write)`, 'warn']);
@@ -436,7 +447,7 @@ function renderVaultOnly() {
     const row = h('div', 'vault-only-row');
     const saved = PARTS.map(([p, name]) => `${name}: ${e[p] ? `saved ${when(e[p].pushedAt)}${e[p].host ? ` on ${e[p].host}` : ''}` : 'not saved'}`).join(' · ');
     row.append(h('span', 'name', id), h('span', 'muted', saved));
-    row.append(button('Add to this Mac', 'btn btn-outline btn-sm', () => openAccountDialog(id)));
+    row.append(button(`Add to ${W().here}`, 'btn btn-outline btn-sm', () => openAccountDialog(id)));
     return row;
   }));
 }
@@ -452,7 +463,7 @@ function card(a) {
   const chips = h('div', 'row');
   if (a.protected) {
     const chip = h('span', 'chip chip-shield', 'Protected');
-    chip.title = 'Switched to, saved and backed up like any other, but never removed from this Mac, and nothing of it can be deleted here (PROTECTED_ACCOUNTS in .env)';
+    chip.title = `Switched to, saved and backed up like any other, but never removed from ${W().here}, and nothing of it can be deleted here (PROTECTED_ACCOUNTS in .env)`;
     chips.append(chip);
   }
   if (state.desktop?.active === a.id) chips.append(h('span', 'chip chip-ok', 'Claude app is here'));
@@ -469,7 +480,7 @@ function card(a) {
   if (a.protected) {
     foot.append(h('span', 'protected-note', 'protected: cannot be removed'));
   } else {
-    foot.append(button('Remove from this Mac', 'btn btn-quiet btn-danger', () => openRemove(a), {
+    foot.append(button(`Remove from ${W().here}`, 'btn btn-quiet btn-danger', () => openRemove(a), {
       disabled: Boolean(busy[a.id]) || onIt,
       title: onIt ? 'The Claude app is on this account: switch it to another one first' : 'Removes the card; what else to delete, if anything, is asked next',
     }));
@@ -491,8 +502,9 @@ function surface(name, stateText, cls, actions, extra = []) {
   return s;
 }
 
-// suggestLoad: this surface has nothing on this Mac, so a Vault copy is the obvious next step.
-function vaultLine(a, part, suggestLoad = false) {
+// suggestLoad: this surface has nothing on this machine, so a Vault copy is the obvious next step.
+// saveBlocked: why a save cannot work yet (shown on the disabled button).
+function vaultLine(a, part, suggestLoad = false, saveBlocked = '') {
   const vi = vaultInfo[a.id];
   const p = vi?.[part];
   let text = 'Vault: checking…';
@@ -511,7 +523,7 @@ function vaultLine(a, part, suggestLoad = false) {
   const line = h('div', 'surface-vault');
   line.append(
     h('span', '', text),
-    button('Save to Vault', 'btn btn-quiet btn-sm', () => saveToVault(a, part), { disabled: locked || !canSave }),
+    button('Save to Vault', 'btn btn-quiet btn-sm', () => saveToVault(a, part), { disabled: locked || !canSave || Boolean(saveBlocked), title: saveBlocked }),
     button('Load from Vault', suggestLoad && canLoad ? 'btn btn-primary btn-sm' : 'btn btn-quiet btn-sm', () => loadFromVault(a, part), {
       disabled: locked || !canLoad,
       title: canLoad ? '' : 'Nothing saved in the Vault for this part yet',
@@ -523,7 +535,7 @@ function vaultLine(a, part, suggestLoad = false) {
 function desktopSurface(a) {
   const d = state.desktop;
   const actions = [];
-  let text = 'only on macOS';
+  let text = 'not available on this system';
   let cls = 'muted';
   const locked = Boolean(busy[a.id]) || Boolean(d?.switching);
   if (d?.supported) {
@@ -533,19 +545,20 @@ function desktopSurface(a) {
       text = d.running ? 'open on this account now' : 'opens on this account next time';
       cls = 'ok';
     } else if (d.parked.includes(a.id)) {
-      text = 'ready: its app data is on this Mac';
+      text = `ready: its app data is on ${W().here}`;
       cls = '';
       actions.push(button('Switch the app to this', 'btn btn-primary', () => switchDesktop(a), { disabled: locked }));
     } else {
       const saved = vaultInfo[a.id]?.desktop?.vault;
-      text = saved ? `no app data on this Mac yet; the Vault has its login (saved ${when(saved.pushedAt)})` : 'no app data on this Mac yet';
+      text = saved ? `no app data on ${W().here} yet; the Vault has its login (saved ${when(saved.pushedAt)})` : `no app data on ${W().here} yet`;
       actions.push(button('Sign in via the app…', 'btn btn-outline', () => newDesktop(a), {
         disabled: locked,
         title: 'Reopens the Claude app signed out, so you can sign in as this account',
       }));
     }
   }
-  return surface('Claude app', text, cls, actions, [vaultLine(a, 'desktop', d?.supported && d.active && !a.onThisMac?.appData)]);
+  const saveBlocked = d?.supported && !d.active ? 'First say which account the Claude app is signed in as (at the top of the page)' : '';
+  return surface('Claude app', text, cls, actions, [vaultLine(a, 'desktop', d?.supported && d.active && !a.onThisMac?.appData, saveBlocked)]);
 }
 
 function cliSurface(a) {
@@ -553,13 +566,13 @@ function cliSurface(a) {
   let text = 'checking…';
   let cls = 'muted';
   if (c?.local?.present === true) {
-    const t = keychainTime(c.local.modified);
-    text = `login on this Mac${t ? `, last changed ${when(t)}` : ''}`;
+    const t = loginTime(c.local.modified);
+    text = `login on ${W().here}${t ? `, last changed ${when(t)}` : ''}`;
     cls = 'ok';
   } else if (c?.local?.present === false) {
-    text = c.vault ? `no login on this Mac yet; the Vault has one (saved ${when(c.vault.pushedAt)})` : 'no login on this Mac yet: Terminal will offer /login';
+    text = c.vault ? `no login on ${W().here} yet; the Vault has one (saved ${when(c.vault.pushedAt)})` : `no login on ${W().here} yet: the terminal will offer /login`;
   } else if (c) {
-    text = 'Terminal asks you to sign in (/login) if needed';
+    text = 'the terminal asks you to sign in (/login) if needed';
   }
   const actions = [button('Open in Terminal', 'btn btn-outline', () => openCli(a), { disabled: Boolean(busy[a.id]) })];
   return surface('Claude Code (CLI)', text, cls, actions, [vaultLine(a, 'cli', c?.local?.present === false)]);
@@ -571,7 +584,7 @@ function cliSurface(a) {
 function ask({ title, lines = [], ok = 'OK', danger = false }) {
   const d = $('#confirm-dialog');
   $('#confirm-title').textContent = title;
-  $('#confirm-body').replaceChildren(...lines.map((l) => h('p', l.startsWith('!') ? 'warn' : '', l.replace(/^!/, ''))));
+  $('#confirm-body').replaceChildren(...lines.filter(Boolean).map((l) => h('p', l.startsWith('!') ? 'warn' : '', l.replace(/^!/, ''))));
   const b = $('#confirm-ok');
   b.textContent = ok;
   b.className = `btn ${danger ? 'btn-danger-solid' : 'btn-primary'}`;
@@ -602,16 +615,23 @@ async function act(a, doing, fn, done) {
   }
 }
 
+// On Windows the running app keeps its cookie file locked: saving the account it is on quits it first.
+const saveQuits = (a, part) => part === 'desktop' && Boolean(state.desktop?.saveQuits && state.desktop.running && state.desktop.active === a.id);
 const SAVE_LINES = {
-  desktop: (a) => [`This saves the Claude app's login cookie for "${a.label}" (nothing else from the app).`, KEYCHAIN],
-  cli: (a) => [`This saves the Claude Code login this Mac keeps for "${a.label}".`, KEYCHAIN],
+  desktop: (a) => [
+    `This saves the Claude app's login cookie for "${a.label}" (nothing else from the app).`,
+    saveQuits(a, 'desktop') ? '!The Claude app will quit (ending whatever is open in it, Claude Code sessions included) and reopen: Windows keeps its cookie file locked while the app runs.' : '',
+    W().allow,
+  ],
+  cli: (a) => [`This saves the Claude Code login ${W().here} keeps for "${a.label}".`, W().allow],
 };
 
 async function saveToVault(a, part, force = false) {
-  if (!force && !(await ask({ title: `Save the ${PART_NAME[part]} login to the Vault?`, lines: SAVE_LINES[part](a), ok: 'Save' }))) return;
+  const quits = saveQuits(a, part);
+  if (!force && !(await ask({ title: `Save the ${PART_NAME[part]} login to the Vault?`, lines: SAVE_LINES[part](a), ok: quits ? 'Quit, save and reopen' : 'Save', danger: quits }))) return;
   const r = await act(
     a,
-    `Saving the ${PART_NAME[part]} login to the Vault… Click Allow if macOS asks.`,
+    `Saving the ${PART_NAME[part]} login to the Vault…${W().allowShort}`,
     () => post(`/api/accounts/${a.id}/vault?parts=${part}${force ? '&force=1' : ''}`),
     (r) => (r[part].ok ? r[part].message : [`Not saved: ${r[part].message}`, true]),
   );
@@ -621,7 +641,7 @@ async function saveToVault(a, part, force = false) {
   if (o && !o.ok && /--force/.test(o.message)) {
     const yes = await ask({
       title: 'The Vault has a different copy',
-      lines: [o.message.replace(/\s*Pull first, or use --force\.?$/, '.'), '!Replace the Vault copy with the login on this Mac? The copy in the Vault is lost.'],
+      lines: [o.message.replace(/\s*Pull first, or use --force\.?$/, '.'), `!Replace the Vault copy with the login on ${W().here}? The copy in the Vault is lost.`],
       ok: 'Replace the Vault copy',
       danger: true,
     });
@@ -637,25 +657,25 @@ function loadLines(a, part) {
         ? '!The Claude app will quit (ending whatever is open in it, Claude Code sessions included) and reopen on this account.'
         : 'The Claude app is not running; it will open on this account next time.',
       'The saved cookie is merged into this account\'s app data; nothing else there is touched.',
-      KEYCHAIN,
+      W().allow,
     ];
   }
   const vault = vaultInfo[a.id]?.cli?.vault;
-  const local = keychainTime(vaultInfo[a.id]?.cli?.local?.modified);
-  const lines = ['!This replaces the Claude Code login this Mac has for the account, then opens Terminal as it.'];
+  const local = loginTime(vaultInfo[a.id]?.cli?.local?.modified);
+  const lines = [`!This replaces the Claude Code login ${W().here} has for the account, then opens a terminal as it.`];
   if (vault && local && local > new Date(vault.pushedAt)) {
-    lines.push(`!This Mac's login (${when(local)}) is newer than the Vault copy (${when(vault.pushedAt)}). Loading the older one may sign you out.`);
+    lines.push(`!The login on ${W().here} (${when(local)}) is newer than the Vault copy (${when(vault.pushedAt)}). Loading the older one may sign you out.`);
   }
-  lines.push(KEYCHAIN);
+  lines.push(W().allow);
   return lines;
 }
 
 async function loadFromVault(a, part) {
-  const ok = part === 'desktop' ? (state.desktop?.running ? 'Quit the app and load' : 'Load') : 'Replace and open Terminal';
+  const ok = part === 'desktop' ? (state.desktop?.running ? 'Quit the app and load' : 'Load') : 'Replace and open a terminal';
   if (!(await ask({ title: `Load the ${PART_NAME[part]} login from the Vault?`, lines: loadLines(a, part), ok, danger: true }))) return;
   await act(
     a,
-    `Loading the ${PART_NAME[part]} login from the Vault… Click Allow if macOS asks.`,
+    `Loading the ${PART_NAME[part]} login from the Vault…${W().allowShort}`,
     () => post(`/api/accounts/${a.id}/vault/load?part=${part}`),
     (r) => r.message,
   );
@@ -694,7 +714,7 @@ async function initDesktop(a) {
 }
 
 async function openCli(a) {
-  await act(a, 'Opening Terminal…', () => post(`/api/accounts/${a.id}/cli`), (r) => `Terminal opened with Claude Code (${r.command})`);
+  await act(a, 'Opening a terminal…', () => post(`/api/accounts/${a.id}/cli`), (r) => `A terminal opened with Claude Code (${r.command})`);
 }
 
 // Forgets the account on this Mac: the card goes, nothing of its data does. Added back any time.
@@ -712,7 +732,7 @@ const mb = (bytes) => (bytes == null ? 'size unknown' : `${(bytes / 1048576).toF
 async function openRemove(a) {
   removeFor = a;
   holdings = null;
-  $('#remove-title').textContent = `Remove "${a.label}" from this Mac`;
+  $('#remove-title').textContent = `Remove "${a.label}" from ${W().here}`;
   $('#remove-summary').replaceChildren(h('p', 'muted', 'Looking at what this account holds…'));
   $('#remove-list').replaceChildren();
   for (const id of ['remove-options', 'remove-confirm-field', 'remove-pass-field', 'remove-backup', 'remove-setpass']) $(`#${id}`).hidden = true;
@@ -749,11 +769,11 @@ function removeItems() {
   const items = [];
   if (hd.vault.desktop?.vault) items.push(['vaultDesktop', `Claude app login in the Vault (saved ${when(hd.vault.desktop.vault.pushedAt)}), every version`, '']);
   if (hd.vault.cli?.vault) items.push(['vaultCli', `Claude Code login in the Vault (saved ${when(hd.vault.cli.vault.pushedAt)}), every version`, '']);
-  if (hd.mac.appData) items.push(['appData', `Claude app data folder on this Mac, ${mb(hd.mac.appData.bytes)}`, hd.mac.appData.path]);
-  if (hd.mac.cliFolder) {
-    items.push(['cliFolder', `Claude Code folder on this Mac, ${mb(hd.mac.cliFolder.bytes)}: all its conversation history, settings, skills and plugins`, hd.mac.cliFolder.path]);
+  if (hd.local.appData) items.push(['appData', `Claude app data folder on ${W().here}, ${mb(hd.local.appData.bytes)}`, hd.local.appData.path]);
+  if (hd.local.cliFolder) {
+    items.push(['cliFolder', `Claude Code folder on ${W().here}, ${mb(hd.local.cliFolder.bytes)}: all its conversation history, settings, skills and plugins`, hd.local.cliFolder.path]);
   }
-  if (hd.mac.keychain?.present) items.push(['keychain', "Claude Code login in this Mac's Keychain", '']);
+  if (hd.local.keychain?.present) items.push(['keychain', `Claude Code login in ${W().store}`, '']);
   if (hd.backups?.files?.length) {
     const n = hd.backups.files.length;
     const total = hd.backups.files.reduce((sum, f) => sum + f.bytes, 0);
@@ -770,7 +790,7 @@ function renderRemove() {
   const list = $('#remove-list');
   list.replaceChildren();
   if (!items.length && !vaultUnknown) {
-    summary.replaceChildren(h('p', '', 'This account has no data on this Mac and nothing in the Vault, so removing the card is all there is to it.'));
+    summary.replaceChildren(h('p', '', `This account has no data on ${W().here} and nothing in the Vault, so removing the card is all there is to it.`));
   } else {
     summary.replaceChildren(
       h('p', '', 'Removing the card deletes nothing by itself. Tick below what you also want deleted. There is no undo.'),
@@ -789,7 +809,7 @@ function renderRemove() {
     }
   }
   $('#remove-options').hidden = !items.length;
-  $('#remove-backup').hidden = !(hd.mac.cliFolder || hd.mac.appData);
+  $('#remove-backup').hidden = !(hd.local.cliFolder || hd.local.appData);
   const setpass = $('#remove-setpass');
   setpass.hidden = !items.length;
   setpass.textContent = hd.passphraseSet ? 'Change the deletion passphrase…' : 'Require a passphrase for deletions…';
@@ -835,7 +855,7 @@ $('#remove-form').addEventListener('submit', async (e) => {
   try {
     if (!ticked.length) {
       await del(`/api/accounts/${a.id}`);
-      log(`[${a.id}] Removed from this Mac. Nothing of its data was deleted.`);
+      log(`[${a.id}] Removed from ${W().here}. Nothing of its data was deleted.`);
     } else {
       const targets = Object.fromEntries(ticked.map((k) => [k, true]));
       if (targets.backups) targets.backups = holdings.backups.files.map((f) => f.path);
@@ -854,7 +874,7 @@ $('#remove-form').addEventListener('submit', async (e) => {
         renderRemove();
         return;
       }
-      log(`[${a.id}] Removed from this Mac.`);
+      log(`[${a.id}] Removed from ${W().here}.`);
     }
     removeDialog.close();
     delete vaultInfo[a.id];
@@ -909,9 +929,9 @@ let accountFromVault = null; // the Vault account being added, or null for a new
 
 function openAccountDialog(vaultId = null) {
   accountFromVault = vaultId;
-  $('#account-title').textContent = vaultId ? `Add "${vaultId}" to this Mac` : 'Add an account';
+  $('#account-title').textContent = vaultId ? `Add "${vaultId}" to ${W().here}` : 'Add an account';
   $('#account-intro').textContent = vaultId
-    ? 'The account gets a card here. Then use its "Load from Vault" buttons to bring the saved logins onto this Mac.'
+    ? `The account gets a card here. Then use its "Load from Vault" buttons to bring the saved logins onto ${W().here}.`
     : 'The account gets a card here. Nothing is signed in yet: on its card, use "Sign in via the app…" for the Claude app and "Open in Terminal" for Claude Code (it asks you to sign in).';
   $('#account-id').value = vaultId ?? '';
   $('#account-id').readOnly = Boolean(vaultId);
@@ -932,12 +952,12 @@ $('#account-form').addEventListener('submit', async (e) => {
   const label = $('#account-label').value.trim();
   const error = $('#account-error');
   if (!/^[\w-]{1,40}$/.test(id)) return void (error.textContent = 'The short name may only use letters, digits, - and _.');
-  if (!accountFromVault && state.accounts.some((a) => a.id === id)) return void (error.textContent = `"${id}" already exists on this Mac.`);
+  if (!accountFromVault && state.accounts.some((a) => a.id === id)) return void (error.textContent = `"${id}" already exists on ${W().here}.`);
   try {
     if (accountFromVault) await post(`/api/vault/add?account=${encodeURIComponent(id)}`, { label });
     else await post('/api/accounts', { id, label });
     accountDialog.close();
-    log(`[${id}] Added to this Mac. ${accountFromVault ? 'Use its "Load from Vault" buttons to bring the logins over.' : 'Sign in on each row of its card.'}`);
+    log(`[${id}] Added to ${W().here}. ${accountFromVault ? 'Use its "Load from Vault" buttons to bring the logins over.' : 'Sign in on each row of its card.'}`);
     await refresh();
     loadVaultAccounts();
   } catch (err) {
@@ -952,6 +972,10 @@ async function refresh() {
     const s = await api('/api/state');
     state.accounts = s.accounts;
     state.desktop = s.desktop;
+    if (s.platform !== state.platform) {
+      state.platform = s.platform;
+      fillWords();
+    }
     for (const a of s.accounts) {
       if (!(a.id in vaultInfo)) {
         vaultInfo[a.id] = null; // placeholder so it loads once, not on every poll
@@ -962,7 +986,7 @@ async function refresh() {
   } catch (e) {
     // An old server (started before this page existed) has no /api/state: say so instead of showing nothing.
     if (/not found|older than/i.test(e.message)) {
-      $('#overview').replaceChildren(h('span', 'warn', 'This dashboard server is older than the page. Restart it from Terminal.app: Ctrl+C, then npm start.'));
+      $('#overview').replaceChildren(h('span', 'warn', 'This dashboard server is older than the page. Restart it from your terminal: Ctrl+C, then npm start.'));
     }
     /* otherwise the server is restarting: the next poll retries */
   }
@@ -992,10 +1016,11 @@ async function loadVaultAccounts() {
 const backupDialog = $('#backup-dialog');
 let backupFor = null;
 
-// The native macOS chooser (the server runs on this Mac): resolves to a path, or null if cancelled.
+// This system's native chooser (the server runs on this machine): resolves to { path } (a picked file
+// also brings its folder and name), or null if cancelled.
 async function browse(kind) {
   const r = await post(`/api/pick?kind=${kind}`);
-  return r.canceled ? null : r.path;
+  return r.canceled ? null : r;
 }
 
 // When this account already has backups in the chosen folder, offer: add a new one, or replace.
@@ -1020,7 +1045,7 @@ $('#backup-browse').addEventListener('click', async () => {
   try {
     const picked = await browse('folder');
     if (picked) {
-      $('#backup-folder').value = picked;
+      $('#backup-folder').value = picked.path;
       refreshBackupExisting();
     }
   } catch (e) {
@@ -1064,7 +1089,7 @@ $('#backup-form').addEventListener('submit', async (e) => {
   backupDialog.close();
   $('#backup-pass').value = '';
   $('#backup-pass2').value = '';
-  await act(a, 'Backing up… This can take a minute. Click Allow if macOS asks for Keychain access.',
+  await act(a, `Backing up… This can take a minute.${W().allowShort}`,
     () => post(`/api/accounts/${a.id}/backup`, { folder, passphrase: pass, replace }),
     (body) => {
       if (body.replaced?.length) log(`[${a.id}]   replaced ${body.replaced.length} older backup(s): ${body.replaced.join(', ')}`);
@@ -1107,7 +1132,7 @@ async function loadBackupList(want = null) {
     if (want) {
       let o = [...select.options].find((x) => x.value === want);
       if (!o) {
-        o = h('option', '', want.split('/').pop());
+        o = h('option', '', want.split(/[\\/]/).pop());
         o.value = want;
         select.append(o);
       }
@@ -1175,8 +1200,8 @@ async function pickBackupFile() {
   try {
     const p = await browse('file');
     if (p) {
-      $('#restore-folder').value = p.slice(0, p.lastIndexOf('/')) || '/';
-      await loadBackupList(p);
+      $('#restore-folder').value = p.folder;
+      await loadBackupList(p.path);
     }
   } catch (e) {
     $('#restore-error').textContent = e.message;
@@ -1187,7 +1212,7 @@ $('#restore-browse-folder').addEventListener('click', async () => {
   try {
     const p = await browse('folder');
     if (p) {
-      $('#restore-folder').value = p;
+      $('#restore-folder').value = p.path;
       await loadBackupList();
     }
   } catch (e) {
@@ -1233,7 +1258,7 @@ $('#restore-form').addEventListener('submit', async (e) => {
       for (const k of ['config', 'desktop']) {
         if (out.parts[k]) log(`${who} Restore: ${k}: ${out.parts[k].copied} files added, ${out.parts[k].skipped} already there (left alone) in ${out.parts[k].target}`);
       }
-      if (out.parts.vault?.written) log(`${who} Next: use the "Load from Vault" buttons to bring the logins onto this Mac.`);
+      if (out.parts.vault?.written) log(`${who} Next: use the "Load from Vault" buttons to bring the logins onto ${W().here}.`);
       loadVaultAccounts();
       for (const id of Object.keys(vaultInfo)) loadVault(id);
     }

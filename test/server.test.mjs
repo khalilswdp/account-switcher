@@ -6,7 +6,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { ROOT, baseEnv, cliService, exists, makeStubs, scratch } from './helpers.mjs';
+import { ROOT, baseEnv, exists, homeEnv, makeStubs, scratch } from './helpers.mjs';
 
 const freePort = () => new Promise((resolve) => {
   const s = net.createServer();
@@ -50,7 +50,7 @@ async function startServer() {
   const env = {
     ...baseEnv(),
     ...stubs.env,
-    HOME: path.join(dir, 'home'),
+    ...homeEnv(path.join(dir, 'home')),
     PORT: String(port),
     BACKUP_DIR: path.join(dir, 'backups'),
     ACCOUNTS_FILE: path.join(dir, 'accounts.json'),
@@ -147,8 +147,8 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   r = await s.post('/api/desktop/new/b');
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.deepEqual(r.body, { ok: true, active: 'b', parked: 'a' });
-  assert.match(await s.stubs.osascriptLog(), /to quit/);
-  assert.match(await s.stubs.openLog(), /-a Claude/);
+  assert.match(await s.stubs.quitLog(), /quit/);
+  assert.match(await s.stubs.openLog(), /open/);
   assert.equal(await exists(path.join(s.support, 'Claude')), false);
   assert.equal(await fs.readFile(path.join(s.support, 'Claude.a', 'marker'), 'utf8'), 'A');
 
@@ -176,10 +176,12 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   assert.equal(r.status, 409);
   assert.match(r.body.error, /switch to it instead/);
 
-  // Claude Code: opening Terminal goes through osascript with the account's own folder
+  // Claude Code: the terminal opens with the account's own folder in the command
   r = await s.post('/api/accounts/b/cli');
   assert.equal(r.status, 200);
-  assert.match(r.body.command, /CLAUDE_CONFIG_DIR=.*claude-b .*claude$/);
+  assert.match(r.body.command, /CLAUDE_CONFIG_DIR=.*claude-b/);
+  assert.match(r.body.command, /claude$/);
+  assert.match(await s.stubs.terminalLog(), /claude-b/);
   r = await s.post('/api/accounts/a/vault?parts=cli');
   assert.equal(r.status, 200);
   assert.equal(r.body.cli.ok, false);
@@ -269,16 +271,15 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   assert.equal(await exists(path.join(s.support, 'Claude.b')), true); // data is never touched by a removal
 
   // deleting data: what b holds, then everything ticked, behind the typed name and a passphrase
-  const user = baseEnv().USER;
-  await s.stubs.seedKeychain(cliService(path.join(s.dir, 'claude-b')), user, '{"t":"B-SECRET"}');
+  await s.stubs.seedCliLogin(path.join(s.dir, 'claude-b'), '{"t":"B-SECRET"}');
   await put('cli/b.json', { ...cliEntry, pushedAt: '2026-02-01T00:00:00.000Z' });
   await fs.writeFile(path.join(s.dir, 'claude-backup-b-20260202-000000.csbk'), 'yy');
   r = await s.call(`/api/accounts/b/holdings?backupFolder=${encodeURIComponent(s.dir)}`);
   assert.equal(r.status, 200);
-  assert.ok(r.body.mac.appData.path.endsWith('Claude.b'));
-  assert.equal(typeof r.body.mac.appData.bytes, 'number');
-  assert.ok(r.body.mac.cliFolder.path.endsWith('claude-b'));
-  assert.equal(r.body.mac.keychain.present, true);
+  assert.ok(r.body.local.appData.path.endsWith('Claude.b'));
+  assert.equal(typeof r.body.local.appData.bytes, 'number');
+  assert.ok(r.body.local.cliFolder.path.endsWith('claude-b'));
+  assert.equal(r.body.local.keychain.present, true);
   assert.equal(r.body.vault.cli.vault.pushedAt, '2026-02-01T00:00:00.000Z');
   assert.equal(r.body.vault.desktop.vault, null);
   assert.deepEqual(r.body.backups.files.map((f) => f.name), ['claude-backup-b-20260202-000000.csbk', 'claude-backup-b-20260101-000000.csbk']);
@@ -325,7 +326,7 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   assert.equal(await exists(path.join(s.support, 'Claude.b')), false);
   assert.equal(await exists(path.join(s.dir, 'claude-b')), false);
   assert.equal(await exists(path.join(s.dir, 'vault', 'cli', 'b.json')), false);
-  await assert.rejects(s.stubs.readKeychain(cliService(path.join(s.dir, 'claude-b')), user));
+  await assert.rejects(s.stubs.readCliLogin(path.join(s.dir, 'claude-b')));
   assert.equal(await exists(path.join(s.dir, 'claude-backup-b-20260202-000000.csbk')), false);
   assert.equal(await exists(path.join(s.dir, 'claude-backup-b-20260101-000000.csbk')), false);
   assert.equal(await exists(path.join(s.dir, 'claude-backup-a-20260101-000000.csbk')), true); // another account's backup stays
@@ -344,7 +345,7 @@ test('dashboard server: a port already in use is reported, not a stack trace', a
   const stubs = await makeStubs(dir);
   await fs.writeFile(path.join(dir, 'accounts.json'), JSON.stringify([{ id: 'a' }]));
   const env = {
-    ...baseEnv(), ...stubs.env, HOME: dir, PORT: String(port),
+    ...baseEnv(), ...stubs.env, ...homeEnv(dir), PORT: String(port),
     BACKUP_DIR: path.join(dir, 'backups'),
     ACCOUNTS_FILE: path.join(dir, 'accounts.json'), SUPPORT_DIR: path.join(dir, 'support'), SWAP_STATE_DIR: path.join(dir, 'state'),
   };
