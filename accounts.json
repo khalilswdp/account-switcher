@@ -1,0 +1,4 @@
+[
+  { "id": "main", "label": "Account 1: Main Claude session" },
+  { "id": "test", "label": "Account 2: Empty test account", "cliConfigDir": "~/.claude-test" }
+]

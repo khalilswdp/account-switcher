@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Account Profiles</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script>tailwind.config = { darkMode: 'media' };</script>
+</head>
+<body class="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+  <main class="mx-auto max-w-3xl p-6">
+    <h1 class="text-lg font-semibold">Account Profiles</h1>
+    <p class="mt-1 text-sm text-zinc-500">
+      Two persistent Chromium profiles, no proxies. Log in once with "Login / Sync Session" (a visible
+      window on this machine), then click "Save Session". After that the profile stays signed in, so
+      there is nothing to reconnect and no MFA again until the site expires the session.
+    </p>
+
+    <div id="cards" class="mt-6 grid gap-4 sm:grid-cols-2"></div>
+
+    <section id="desktop" class="mt-6 hidden rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <h2 class="text-sm font-semibold">Claude desktop app</h2>
+      <p id="desktop-info" class="mt-2 text-xs text-zinc-500"></p>
+      <div id="desktop-actions" class="mt-3 flex flex-wrap gap-2"></div>
+    </section>
+
+    <h2 class="mt-8 text-sm font-medium text-zinc-500">Activity</h2>
+    <div id="log" class="mt-2 h-48 overflow-y-auto rounded-lg bg-black p-3 font-mono text-xs leading-5 text-zinc-300"></div>
+  </main>
+
+<script>
+'use strict';
+
+const $ = (s) => document.querySelector(s);
+const h = (tag, cls = '', text) => {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text; // textContent only: page titles are untrusted
+  return el;
+};
+
+const STATUS = {
+  not_logged_in: ['Not Logged In', 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'],
+  ready:         ['Ready / Idle', 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300'],
+  login_required: ['Login required', 'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300'],
+  busy:          ['Running task', 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300'],
+  login:         ['Login window open', 'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300'],
+};
+const BTN = 'rounded-md px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50';
+const OUTLINE = 'border border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800';
+
+let accounts = [];
+const inFlight = new Set();
+
+function log(text, error = false) {
+  const line = h('div', error ? 'text-rose-400' : '', `${new Date().toTimeString().slice(0, 8)}  ${text}`);
+  const box = $('#log');
+  box.append(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function call(id, action, label) {
+  inFlight.add(id);
+  render();
+  try {
+    const res = await fetch(`/api/accounts/${id}/${action}`, { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    if (action === 'task') {
+      const state = body.loggedIn === true ? 'signed in' : body.loggedIn === false ? 'LOGIN REQUIRED' : 'login state unknown (challenge page)';
+      log(`[${id}] ${state}: "${body.title}" (${body.cookies} cookies, ${body.url})`, body.loggedIn === false);
+    } else if (action === 'cli') {
+      log(`[${id}] Terminal opened with Claude Code (${body.command})`);
+    } else if (action === 'save') {
+      log(`[${id}] Session saved`);
+    } else {
+      log(`[${id}] ${label}`);
+    }
+  } catch (e) {
+    log(`[${id}] ${label} failed: ${e.message}`, true);
+  } finally {
+    inFlight.delete(id);
+    refresh();
+  }
+}
+
+function card(a) {
+  const [label, badge] = STATUS[a.status];
+  const el = h('article', 'rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900');
+  const head = h('div', 'flex items-start justify-between gap-2');
+  head.append(h('h2', 'text-sm font-semibold', a.label), h('span', `shrink-0 rounded px-2 py-0.5 text-[11px] font-bold ${badge}`, label));
+  el.append(head);
+
+  el.append(h('p', 'mt-3 font-mono text-xs text-zinc-500', `CLI config: ${a.cliConfigDir ?? 'default (~/.claude)'}`));
+  if (a.lastResult) {
+    el.append(h('p', 'mt-3 break-words text-xs text-zinc-500', `Last task: "${a.lastResult.title}" (${a.lastResult.cookies} cookies)`));
+  }
+
+  const actions = h('div', 'mt-4 flex flex-wrap gap-2');
+  const btn = (text, cls, action, label, disabled = false, confirmText = '') => {
+    const b = h('button', `${BTN} ${cls}`, text);
+    b.disabled = disabled || inFlight.has(a.id);
+    b.addEventListener('click', () => {
+      if (confirmText && !confirm(confirmText)) return;
+      call(a.id, action, label);
+    });
+    actions.append(b);
+  };
+
+  if (a.status === 'login') {
+    btn('Save Session', 'bg-emerald-600 text-white hover:bg-emerald-500', 'save', 'Saving session');
+  } else {
+    btn('Login / Sync Session', 'bg-violet-600 text-white hover:bg-violet-500', 'login', 'Login window opened', a.status === 'busy');
+    btn('Open Claude Code', 'bg-zinc-800 text-white hover:bg-zinc-700 dark:bg-zinc-200 dark:text-zinc-900 dark:hover:bg-zinc-300', 'cli', 'Terminal opened');
+    btn('Run test task', OUTLINE, 'task', 'Task', !['ready', 'login_required'].includes(a.status));
+    btn(
+      'Reset profile',
+      'border border-rose-300 text-xs text-rose-600 hover:bg-rose-50 dark:border-rose-800 dark:text-rose-400 dark:hover:bg-rose-950',
+      'reset',
+      'Profile reset',
+      a.status === 'busy',
+      `Delete the saved profile and backup for "${a.label}"? You will need to log in again.`,
+    );
+  }
+  el.append(actions);
+  return el;
+}
+
+function render() {
+  $('#cards').replaceChildren(...accounts.map(card));
+}
+
+async function refresh() {
+  try {
+    accounts = await (await fetch('/api/accounts')).json();
+    render();
+  } catch {
+    /* server restarting: next poll retries */
+  }
+}
+
+// ------------------------------------------------------- desktop app switcher
+
+let desktop = null;
+let desktopBusy = false;
+const nameOf = (id) => accounts.find((a) => a.id === id)?.label ?? id;
+
+function renderDesktop() {
+  const sec = $('#desktop');
+  if (!desktop || !desktop.supported) return sec.classList.add('hidden');
+  sec.classList.remove('hidden');
+
+  const info = $('#desktop-info');
+  const actions = $('#desktop-actions');
+  actions.replaceChildren();
+
+  if (!desktop.active) {
+    info.textContent = 'Not set up yet. In Terminal.app run: ./scripts/desktop-swap.sh init <account currently signed in>';
+    return;
+  }
+  info.textContent = `Active: ${nameOf(desktop.active)}  |  App: ${desktop.running ? 'running' : 'not running'}`;
+
+  if (!desktop.parked.length) {
+    actions.append(h('span', 'text-xs text-zinc-500', 'No other desktop account yet. Create one with: ./scripts/desktop-swap.sh new <name>'));
+  }
+  for (const name of desktop.parked) {
+    const b = h('button', `${BTN} bg-violet-600 text-white hover:bg-violet-500`, `Switch to ${nameOf(name)}`);
+    b.disabled = desktopBusy || desktop.switching;
+    b.addEventListener('click', () => switchDesktop(name));
+    actions.append(b);
+  }
+}
+
+async function switchDesktop(name) {
+  const warning = desktop.running
+    ? 'The Claude app will QUIT (this ends any session open in it, including Claude Code sessions) and then reopen as the other account.'
+    : 'The Claude app is not running, so this only changes which account it opens next.';
+  if (!confirm(`Switch the Claude desktop app to "${nameOf(name)}"?\n\n${warning}`)) return;
+
+  desktopBusy = true;
+  renderDesktop();
+  log(`[desktop] Switching to ${nameOf(name)}...`);
+  try {
+    const res = await fetch(`/api/desktop/switch/${encodeURIComponent(name)}`, { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    log(`[desktop] Now on ${nameOf(name)}${body.relaunched ? ' (app reopened)' : ''}`);
+  } catch (e) {
+    log(`[desktop] Switch failed: ${e.message}`, true);
+  } finally {
+    desktopBusy = false;
+    refreshDesktop();
+  }
+}
+
+async function refreshDesktop() {
+  try {
+    desktop = await (await fetch('/api/desktop')).json();
+    renderDesktop();
+  } catch {
+    /* server restarting: next poll retries */
+  }
+}
+
+refresh();
+refreshDesktop();
+setInterval(refresh, 2000);
+setInterval(refreshDesktop, 5000);
+</script>
+</body>
+</html>
