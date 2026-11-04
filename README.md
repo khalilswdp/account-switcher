@@ -26,6 +26,11 @@ npm start                       # the dashboard, on http://127.0.0.1:3000
 
 After a reboot or a container restart the Vault is sealed: `npm run vault:local -- unseal`.
 
+The first time, the page needs to know which account the Claude app is signed in as. It works that
+out by itself when it can (the app's data names its account, and one of your Claude Code logins is
+the same account); otherwise it asks, at the top of the page. To start that over, delete the file
+`~/.claude-desktop-accounts/active`.
+
 ## The Vault token
 
 `init` writes two files into `~/.claude-switcher-vault` (`C:\Users\<you>\.claude-switcher-vault` on
@@ -79,7 +84,7 @@ npm run backup -- restore <file> --out <folder> [--to-vault]
 
 | | macOS | Windows |
 |---|---|---|
-| Claude app data: active, parked | `~/Library/Application Support/Claude`, `Claude.<name>` | `%APPDATA%\Claude`, `Claude.<name>` |
+| Claude app data: active, parked | `~/Library/Application Support/Claude`, `Claude.<name>` | `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude`, `Claude.<name>` for the Store-style app (inside the app it looks like `%APPDATA%\Claude`); `%APPDATA%\Claude` for the older installer |
 | Claude Code folder | `~/.claude` for `main`, `~/.claude-<name>` for the others | the same, under `C:\Users\<you>` |
 | Claude Code login | a Keychain item | `.credentials.json` inside that folder |
 | Vault keys and token | `~/.claude-switcher-vault/` | `C:\Users\<you>\.claude-switcher-vault\` |

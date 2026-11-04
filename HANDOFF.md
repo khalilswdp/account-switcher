@@ -26,7 +26,7 @@ A local dashboard (`http://127.0.0.1:3000`) that lets one person keep several Cl
 
 | Part | What the account is | macOS | Windows |
 |---|---|---|---|
-| Claude app (desktop) | The app's login: one cookie, `sessionKey` | `~/Library/Application Support/Claude[.<name>]/Cookies`, encrypted with the per-Mac key in the Keychain item "Claude Safe Storage" (AES-128-CBC) | `%APPDATA%\Claude[.<name>]\Network\Cookies`, encrypted with a per-folder key kept in that folder's `Local State`, protected with DPAPI for the Windows user (AES-256-GCM) |
+| Claude app (desktop) | The app's login: one cookie, `sessionKey` | `~/Library/Application Support/Claude[.<name>]/Cookies`, encrypted with the per-Mac key in the Keychain item "Claude Safe Storage" (AES-128-CBC) | `<app data>\Claude[.<name>]\Network\Cookies`, where `<app data>` is `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming` for the Store-style app (`%APPDATA%` for the older installer; see "Gotchas"), encrypted with a per-folder key kept in that folder's `Local State`, protected with DPAPI for the Windows user (AES-256-GCM) |
 | Claude Code CLI | The CLI's login | A Keychain item, one per config folder | The file `.credentials.json` inside the config folder |
 
 The Vault entries are the same on both systems (the cookie is stored decrypted, the CLI login is the
@@ -113,7 +113,12 @@ of the active account quits the app first, and the confirmation says so).
 **Accounts, from the page.** "Add an account…" makes a brand-new one (`POST /api/accounts` with
 `{id, label}`): it gets a card with nothing signed in; "Sign in via the app…" and "Open in Terminal" take
 it from there. When the app's data folder is not assigned yet, the page asks "which account is the Claude
-app signed in as right now?" (`POST /api/desktop/init/:id`). An account with no app data gets "Sign in
+app signed in as right now?" (`POST /api/desktop/init/:id`), unless the server could tell: the app's
+`config.json` holds `lastKnownAccountUuid`, Claude Code's `.claude.json` (next to the default folder, inside
+any other) holds `oauthAccount.accountUuid` for each local login, and exactly one match is reported as
+`desktop.detected` in `/api/state` (account and masked email); the page then records it on its own
+(`autoSetup`, once per load) and says so in the activity log. `init` moves and quits nothing, so it is
+allowed from inside the app. An account with no app data gets "Sign in
 via the app…" (`POST /api/desktop/new/:id`: parks the current data, reopens the app signed out). An
 account that exists only in the Vault is listed with "Add to this Mac/PC" (`POST /api/vault/add?account=`,
 optional `{label}`), after which its card's Load buttons bring the logins over. Both kinds are remembered
@@ -347,11 +352,19 @@ Windows:
   are looked up once through PowerShell (`Win32_Process`, about 0.6 s with its startup) for their
   executable and remembered until they go away. Only the app's own executable counts, and only those
   PIDs are ever passed to `taskkill`.
-- **The app is a Store-style package** (`C:\Program Files\WindowsApps\Claude_<version>_x64__<id>\app\Claude.exe`,
-  found through `HKCU\Software\Classes\claude\shell\open\command`). It is started by its app id
-  (`explorer.exe shell:AppsFolder\Claude_<id>!Claude`, from `Get-StartApps`) so it runs with its package
-  identity; its folder changes with every update, so nothing is cached across runs. An older
-  `%LOCALAPPDATA%\AnthropicClaude\claude.exe` install is tried too, and `CLAUDE_DESKTOP_EXE` overrides.
+- **The app is a Store-style package** (`C:\Program Files\WindowsApps\Claude_<version>_x64__<id>\app\Claude.exe`),
+  **and Windows virtualises its AppData and registry.** Its writes to `%APPDATA%\Claude` really land in
+  `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude`, and its `claude://` handler lives in the
+  package's own registry hive. A process inside the app (a Code tab shell, anything it starts) sees both
+  merged into `%APPDATA%\Claude` and `HKCU`; a process outside sees neither: on this PC the real
+  `%APPDATA%\Claude` does not exist. Found on 2026-11-04 when the detached dashboard could not read
+  `config.json` that a shell in the app could. `platform.mjs` therefore takes `<Packages>\Claude_*\LocalCache\Roaming`
+  as the data folder whenever it holds a `Claude` folder, finds the executable through `Get-AppxPackage` when
+  the registry does not answer, and starts the app by its app id (`explorer.exe shell:AppsFolder\Claude_<id>!Claude`,
+  confirmed with `Get-StartApps`) so it runs with its package identity; its install folder changes with every
+  update, so nothing is cached across runs. An older `%LOCALAPPDATA%\AnthropicClaude\claude.exe` install is
+  tried too, and `CLAUDE_DESKTOP_EXE` overrides. Any folder sizes or checks taken from inside the app were of
+  the merged view: the same files.
 - **Quitting:** `taskkill /PID` (window close) first, then after 6 s `taskkill /F /T` on the main process,
   because closing the window may only hide the app to the tray. The tree kill also ends Claude Code
   sessions the app started, as the macOS quit does.

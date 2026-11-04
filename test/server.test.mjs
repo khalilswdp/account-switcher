@@ -134,6 +134,16 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   r = await s.post('/api/desktop/switch/b');
   assert.equal(r.status, 409);
   assert.match(r.body.error, /Not set up/);
+  // the setup can be worked out: the app's data names its account, and b's Claude Code config names
+  // the same one (the email comes back masked, the id never)
+  r = await s.call('/api/state');
+  assert.equal(r.body.desktop.detected, null);
+  await fs.mkdir(path.join(s.dir, 'claude-b'), { recursive: true });
+  await fs.writeFile(path.join(s.dir, 'claude-b', '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'acct-B-UUID', emailAddress: 'tester@example.com' } }));
+  await fs.writeFile(path.join(s.support, 'Claude', 'config.json'), JSON.stringify({ lastKnownAccountUuid: 'acct-B-UUID' }));
+  r = await s.call('/api/state');
+  assert.deepEqual(r.body.desktop.detected, { account: 'b', email: 'te***@example.com' });
+  assert.doesNotMatch(JSON.stringify(r.body), /tester@|acct-B/);
   r = await s.post('/api/desktop/init/a');
   assert.equal(r.status, 200, JSON.stringify(r.body));
   r = await s.call('/api/state');
@@ -163,8 +173,9 @@ test('dashboard server: state, guards, desktop flows, Vault listing, backups', a
   assert.equal(r.body.desktop.active, 'a');
   assert.deepEqual(r.body.desktop.parked, ['b']);
   assert.equal(r.body.desktop.running, true);
-  await fs.mkdir(path.join(s.dir, 'claude-b'));
+  await fs.mkdir(path.join(s.dir, 'claude-b'), { recursive: true });
   r = await s.call('/api/state');
+  assert.equal(r.body.desktop.detected, null); // assigned now: nothing left to work out
   assert.deepEqual(r.body.accounts.map((x) => [x.id, x.onThisMac]), [
     ['a', { appData: true, cliFolder: false }], // active
     ['b', { appData: true, cliFolder: true }], // parked, with a Claude Code folder

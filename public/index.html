@@ -130,6 +130,7 @@
   <section id="setup" class="panel setup" hidden>
     <h2>One-time setup: which account is the Claude app signed in as right now?</h2>
     <p class="muted">Open the Claude app and look at its account, then pick it here. Nothing is moved or changed; from then on the dashboard can switch the app between accounts.</p>
+    <p id="setup-detected" class="ok" style="margin-top: .5rem;"></p>
     <div id="setup-accounts" class="row"></div>
   </section>
 
@@ -433,9 +434,26 @@ function renderOverview() {
   const setup = $('#setup');
   setup.hidden = !(d?.supported && !d.active);
   if (!setup.hidden) {
+    const found = d.detected;
+    $('#setup-detected').textContent = found
+      ? `The app's data matches "${labelOf(found.account)}": Claude Code is signed in there as ${found.email}. It is being recorded as that account.`
+      : '';
     $('#setup-accounts').replaceChildren(...state.accounts.map((a) =>
-      button(a.label, 'btn btn-outline', () => initDesktop(a), { disabled: Boolean(busy[a.id]) })));
+      button(a.label, found?.account === a.id ? 'btn btn-primary' : 'btn btn-outline', () => initDesktop(a), { disabled: Boolean(busy[a.id]) })));
   }
+}
+
+// The one-time setup without a click, when the server could tell which account the app's data
+// belongs to (its id matches one local Claude Code login). Tried once per page load.
+let autoSetupTried = false;
+async function autoSetup() {
+  const d = state.desktop;
+  if (autoSetupTried || !d?.supported || d.active || !d.detected) return;
+  autoSetupTried = true;
+  const a = state.accounts.find((x) => x.id === d.detected.account);
+  if (!a) return;
+  await act(a, 'Recording the Claude app\'s account, worked out from its data…', () => post(`/api/desktop/init/${encodeURIComponent(a.id)}`),
+    () => `The Claude app is tracked as this account: its data matches the Claude Code login ${d.detected.email}`);
 }
 
 function renderVaultOnly() {
@@ -983,6 +1001,7 @@ async function refresh() {
       }
     }
     render();
+    autoSetup();
   } catch (e) {
     // An old server (started before this page existed) has no /api/state: say so instead of showing nothing.
     if (/not found|older than/i.test(e.message)) {

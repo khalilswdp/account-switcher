@@ -47,6 +47,17 @@ export async function listState() {
   return { active: activeName() || null, running: await appRunning(), parked: await parkedNames() };
 }
 
+// The account a data folder was last signed in as: the id the app keeps in its config.json (an
+// identifier, not a secret). Null when the folder or the id is not there.
+export async function appAccountUuid(folder = ACTIVE_FOLDER) {
+  try {
+    const { lastKnownAccountUuid: id } = JSON.parse(await fs.readFile(path.join(folder, 'config.json'), 'utf8'));
+    return typeof id === 'string' && id ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 function checkName(name, usage) {
   if (!name) throw new Error(`usage: desktop-swap.mjs ${usage} <name>`);
   if (!validName(name)) throw new Error('account name may only use letters, digits, - and _');

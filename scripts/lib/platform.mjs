@@ -11,7 +11,7 @@
 // test/helpers.mjs), so no test touches the real app, a real login or a real key. Everything
 // else runs as it does for real, in the scratch folders the other environment variables name.
 import fs from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
@@ -42,11 +42,31 @@ export const cookieFileLockedWhileRunning = isWindows;
 
 export const expandHome = (p) => (p === '~' ? os.homedir() : /^~[\\/]/.test(p ?? '') ? path.join(os.homedir(), p.slice(2)) : p);
 
+// Windows, Store-style (MSIX) install: the app's package folder under %LOCALAPPDATA%\Packages.
+// Windows redirects such an app's writes to %APPDATA% (and to HKCU) into the package's own
+// LocalCache\Roaming folder (and registry hive): processes inside the app see them merged at
+// %APPDATA%\Claude, every other process sees them only there. So that is where the data folder
+// really is, and the folder renames must happen there for the app to notice.
+let packageDir; // ...\Packages\Claude_<id>, or null
+export function windowsPackage() {
+  if (packageDir !== undefined) return packageDir;
+  packageDir = null;
+  const packages = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Packages');
+  try {
+    for (const name of readdirSync(packages)) {
+      if (/^Claude_/.test(name) && existsSync(path.join(packages, name, 'LocalCache', 'Roaming', 'Claude'))) packageDir = path.join(packages, name);
+    }
+  } catch {
+    /* no Packages folder: not a Store-style install */
+  }
+  return packageDir;
+}
+
 // Where the Claude desktop app keeps its data: "<SUPPORT>/Claude" is the active account, and
 // scripts/lib/desktop.mjs parks the others next to it as "Claude.<name>".
 export const SUPPORT = process.env.SUPPORT_DIR
   || (isWindows
-    ? process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming')
+    ? (windowsPackage() ? path.join(windowsPackage(), 'LocalCache', 'Roaming') : process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'))
     : isMac
       ? path.join(os.homedir(), 'Library', 'Application Support')
       : process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'));
@@ -93,8 +113,10 @@ function powershell(script, { input = '', args = [], timeout } = {}) {
 
 // ------------------------------------------------------- the desktop app process
 
-// Windows: the app's executable, from the claude:// handler it registers (its install folder
-// changes with every update). CLAUDE_DESKTOP_EXE overrides it.
+// Windows: the app's executable (its install folder changes with every update). From the claude://
+// handler it registers, which only a process inside the app's own registry view sees for a
+// Store-style install; otherwise from the package system; otherwise the older installer's place.
+// CLAUDE_DESKTOP_EXE overrides it.
 let appExePromise;
 function appExe() {
   appExePromise ??= (async () => {
@@ -104,7 +126,15 @@ function appExe() {
       const m = /REG_SZ\s+"?([^"\r\n]+?\.exe)"?/i.exec(stdout);
       if (m) return m[1];
     } catch {
-      /* not registered: the known place of the older installer */
+      /* not visible here */
+    }
+    if (windowsPackage()) {
+      try {
+        const location = (await powershell('Get-AppxPackage -Name Claude | Select-Object -First 1 -ExpandProperty InstallLocation')).trim();
+        if (location) return path.join(location, 'app', 'Claude.exe');
+      } catch {
+        /* the package system did not answer */
+      }
     }
     const older = path.join(process.env.LOCALAPPDATA || '', 'AnthropicClaude', 'claude.exe');
     return existsSync(older) ? older : null;
@@ -229,12 +259,13 @@ export async function quitApp() {
 }
 
 // Windows, Store-style (MSIX) install: the app id to start it by, so it runs with its package
-// identity (running the .exe straight from WindowsApps does not).
+// identity (running the .exe straight from WindowsApps does not). The package family is the
+// package folder's name (Claude_<id>), or comes from the executable's path.
 let appIdPromise;
 function windowsAppId(exe) {
   appIdPromise ??= (async () => {
-    const pkg = /\\WindowsApps\\([^\\]+)/i.exec(exe)?.[1] ?? ''; // Claude_1.2.3.0_x64__abcdefgh
-    const family = `${pkg.split('_')[0]}_${pkg.split('__').pop()}`; // Claude_abcdefgh
+    const pkg = windowsPackage() ? path.basename(windowsPackage()) : /\\WindowsApps\\([^\\]+)/i.exec(exe ?? '')?.[1] ?? ''; // Claude_abcdefgh, or Claude_1.2.3.0_x64__abcdefgh
+    const family = `${pkg.split('_')[0]}_${pkg.split('_').pop()}`; // Claude_abcdefgh
     try {
       const out = await powershell(`Get-StartApps | Where-Object { $_.AppID -like '${family}!*' } | Select-Object -First 1 -ExpandProperty AppID`);
       if (out.trim()) return out.trim();
@@ -258,8 +289,9 @@ export async function openApp() {
   }
   if (isWindows) {
     const exe = await appExe();
-    if (!exe) throw new Error('cannot find the Claude app: set CLAUDE_DESKTOP_EXE to its Claude.exe');
-    const child = /\\windowsapps\\/i.test(exe)
+    const packaged = Boolean(windowsPackage()) || /\\windowsapps\\/i.test(exe ?? '');
+    if (!exe && !packaged) throw new Error('cannot find the Claude app: set CLAUDE_DESKTOP_EXE to its Claude.exe');
+    const child = packaged
       ? spawn('explorer.exe', [`shell:AppsFolder\\${await windowsAppId(exe)}`], { detached: true, stdio: 'ignore', windowsHide: true })
       : spawn(exe, [], { detached: true, stdio: 'ignore' });
     child.on('error', () => {});

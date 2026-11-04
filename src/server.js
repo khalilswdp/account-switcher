@@ -11,7 +11,7 @@ import {
   OS, SUPPORT, cookieFileLockedWhileRunning, desktopSupported, expandHome, folderBytes, insideDesktopApp, isMac, isWindows,
   openApp, openTerminal, pickPath as nativePick, quitApp,
 } from '../scripts/lib/platform.mjs';
-import { init as initSwap, listState, newAccount as newSwap, use as useSwap } from '../scripts/lib/desktop.mjs';
+import { appAccountUuid, init as initSwap, listState, newAccount as newSwap, use as useSwap } from '../scripts/lib/desktop.mjs';
 
 // The optional settings file (.env, gitignored) is loaded by scripts/lib/platform.mjs on import;
 // real environment variables win over it.
@@ -188,9 +188,10 @@ async function switchDesktop(name) {
   }
 }
 
-// First run: the app's current data folder becomes account <id>. Nothing is moved.
+// First run: the app's current data folder becomes account <id>. Nothing is moved and nothing is
+// quit, so this is fine from anywhere.
 async function initDesktop(id) {
-  await guardDesktopApp();
+  if (!desktopSupported) throw httpError(501, 'The desktop switcher is only supported on macOS and Windows');
   notWhileVaulting();
   const state = await desktopState();
   if (state.active) throw httpError(409, `Already set up: the Claude app is on "${state.active}"`);
@@ -442,9 +443,38 @@ const backupFile = (file) => {
 
 // ------------------------------------------------- Deleting an account's data
 
+const cliDirOf = (id) => expandHome(ACCOUNTS[id].cliConfigDir ?? '~/.claude');
+
+// The one-time setup, worked out when it can be: the app's data folder names the account it was
+// last signed in as (config.json, lastKnownAccountUuid), and Claude Code's own config
+// (.claude.json, next to the default folder or inside any other) names the account each local
+// login belongs to. Exactly one match is the answer, and the page records it. Ids are compared,
+// never shown; the email comes back masked.
+const maskEmail = (e) => (typeof e === 'string' && e.includes('@') ? `${e.slice(0, 2)}***${e.slice(e.indexOf('@'))}` : null);
+async function cliAccount(configDir) {
+  const dir = path.resolve(configDir);
+  const file = dir === path.resolve(os.homedir(), '.claude') ? path.join(os.homedir(), '.claude.json') : path.join(dir, '.claude.json');
+  try {
+    const { oauthAccount: a } = JSON.parse(await fs.readFile(file, 'utf8'));
+    return typeof a?.accountUuid === 'string' && a.accountUuid ? { uuid: a.accountUuid, email: maskEmail(a.emailAddress) } : null;
+  } catch {
+    return null;
+  }
+}
+async function detectDesktopAccount(desktop) {
+  if (!desktop.supported || desktop.active) return null;
+  const uuid = await appAccountUuid();
+  if (!uuid) return null;
+  const matches = [];
+  for (const id of Object.keys(ACCOUNTS)) {
+    const info = await cliAccount(cliDirOf(id));
+    if (info?.uuid === uuid) matches.push({ account: id, email: info.email });
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
 // What an account holds, for the removal dialog: its Vault entries, what is on this machine (with
 // sizes), and its backup files in the folder the page remembers. Names, sizes and times only.
-const cliDirOf = (id) => expandHome(ACCOUNTS[id].cliConfigDir ?? '~/.claude');
 
 async function holdings(id, backupFolder) {
   const desktop = await desktopState();
@@ -626,10 +656,16 @@ async function accountList(desktop = null) {
 app.get('/api/accounts', async (req, res) => res.json(await accountList(await desktopState())));
 // Everything the page polls, in one answer. "platform" lets the page use this system's words
 // (this Mac / this PC, Keychain / credentials file); "saveQuits" says a desktop save of the active
-// account quits the app (Windows).
+// account quits the app (Windows); "detected" is the account the app's data belongs to, when that
+// can be told and the app is not assigned yet.
 app.get('/api/state', async (req, res) => {
   const desktop = await desktopState();
-  res.json({ build: BUILD, platform: OS, accounts: await accountList(desktop), desktop: { ...desktop, switching, saveQuits: cookieFileLockedWhileRunning } });
+  res.json({
+    build: BUILD,
+    platform: OS,
+    accounts: await accountList(desktop),
+    desktop: { ...desktop, switching, saveQuits: cookieFileLockedWhileRunning, detected: await detectDesktopAccount(desktop) },
+  });
 });
 
 // A new account made on the page. Nothing is signed in yet; the card's rows take it from there.

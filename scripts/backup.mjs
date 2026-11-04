@@ -59,7 +59,7 @@ const log = (msg) => process.stderr.write(`${msg}\n`);
 const CONFIG_SKIP = ['cache', 'debug', 'telemetry', 'shell-snapshots', 'session-env', 'downloads', 'statsig', '.DS_Store', '.credentials.json'];
 const DESKTOP_SKIP = new Set([
   'vm_bundles', 'claude-code', 'claude-code-vm', 'Cache', 'Code Cache', 'GPUCache', 'GraphiteDawnCache',
-  'DawnGraphiteCache', 'DawnWebGPUCache', 'GPUPersistentCache', 'Crashpad', 'Shared Dictionary', 'lockfile',
+  'DawnGraphiteCache', 'DawnWebGPUCache', 'GPUPersistentCache', 'Crashpad', 'Shared Dictionary', 'lockfile', 'logs', 'sentry', 'fcache',
   'Cookies', 'Cookies-journal', 'Network', // encrypted with this machine's key: the login is in vault/ instead
   'Local State', // holds that key on Windows: it belongs to this machine and this user
 ]);
