@@ -190,9 +190,12 @@ const lastRev = (n) => fs.readFile(revFile(n), 'utf8').then((s) => s.trim(), () 
 
 // ----------------------------------------------------------------- commands
 
-async function status(name) {
+async function status(name, asJson) {
   checkAllowed(name);
   const remote = await readRemote(name);
+  if (asJson) {
+    return console.log(JSON.stringify({ vault: remote ? { items: remote.items, pushedAt: remote.pushedAt, host: remote.host } : null }));
+  }
   console.log(`[${name}]`);
   console.log(`  vault : ${remote ? `${remote.items.join(', ')} | pushed ${remote.pushedAt} from ${remote.host}` : 'empty'}`);
   console.log(`  local : ${(await exists(parked(name))) || activeName() === name ? 'account folder present' : 'no account folder on this Mac'}`);
@@ -270,7 +273,7 @@ const flag = (f) => rest.includes(f);
 const asIndex = rest.indexOf('--as');
 try {
   if (cmd === 'status') {
-    for (const n of name ? [name] : ALLOWED) await status(n);
+    for (const n of name ? [name] : ALLOWED) await status(n, flag('--json'));
   } else if (cmd === 'push') await push(name, flag('--force'));
   else if (cmd === 'pull') await pull(name, asIndex >= 0 ? rest[asIndex + 1] : undefined);
   else fail('usage: desktop-vault.mjs <status [name] | push <name> [--force] | pull <name> [--as <new>]>');

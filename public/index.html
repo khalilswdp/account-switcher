@@ -51,6 +51,26 @@ const OUTLINE = 'border border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 d
 
 let accounts = [];
 const inFlight = new Set();
+const vaultInfo = {}; // accountId -> what the Vault holds for that account, loaded on demand
+
+const when = (iso) => new Date(iso).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+
+async function loadVault(id) {
+  try {
+    vaultInfo[id] = await (await fetch(`/api/accounts/${id}/vault`)).json();
+  } catch {
+    const unavailable = { state: 'blocked', message: 'unavailable' };
+    vaultInfo[id] = { desktop: unavailable, browser: unavailable };
+  }
+  render();
+}
+
+// [text, dim?] for one part of the "Saved in the Vault" box
+function vaultText(part, describe) {
+  if (!part) return ['checking...', true];
+  if (part.state === 'blocked') return [/not allowed/.test(part.message) ? 'not enabled for this account yet' : part.message, true];
+  return part.vault ? [`${describe(part.vault)}, ${when(part.vault.pushedAt)}`, false] : ['nothing saved yet', true];
+}
 
 function log(text, error = false) {
   const line = h('div', error ? 'text-rose-400' : '', `${new Date().toTimeString().slice(0, 8)}  ${text}`);
@@ -65,15 +85,23 @@ async function call(id, action, label) {
   try {
     const res = await fetch(`/api/accounts/${id}/${action}`, { method: 'POST' });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
+    if (!res.ok) {
+      throw new Error(
+        res.status === 404 && body.error === 'Not found'
+          ? 'this dashboard server is older than the page. Restart it (Ctrl+C, then npm start).'
+          : body.error || res.statusText,
+      );
+    }
     if (action === 'task') {
       const state = body.loggedIn === true ? 'signed in' : body.loggedIn === false ? 'LOGIN REQUIRED' : 'login state unknown (challenge page)';
       log(`[${id}] ${state}: "${body.title}" (${body.cookies} cookies, ${body.url})`, body.loggedIn === false);
     } else if (action === 'cli') {
       log(`[${id}] Terminal opened with Claude Code (${body.command})`);
     } else if (action === 'vault') {
-      log(`[${id}] Desktop app: ${body.desktop.message}`, !body.desktop.ok);
-      log(`[${id}] Browser session: ${body.browser.message}`, !body.browser.ok);
+      log(`[${id}] Vault, desktop app: ${body.desktop.message}`, !body.desktop.ok);
+      log(`[${id}] Vault, browser session: ${body.browser.message}`, !body.browser.ok);
+      log(`[${id}] Vault, Claude Code CLI: ${body.cli.message}`);
+      loadVault(id);
     } else if (action === 'save') {
       log(`[${id}] Session saved`);
     } else {
@@ -99,6 +127,20 @@ function card(a) {
     el.append(h('p', 'mt-3 break-words text-xs text-zinc-500', `Last task: "${a.lastResult.title}" (${a.lastResult.cookies} cookies)`));
   }
 
+  // What is in the Vault right now, per part. The CLI login can never be stored there.
+  const vi = vaultInfo[a.id];
+  const box = h('div', 'mt-3 space-y-1 rounded-md bg-zinc-100 p-2 text-xs dark:bg-zinc-800/60');
+  box.append(h('p', 'font-medium text-zinc-600 dark:text-zinc-300', 'Saved in the Vault'));
+  const line = (name, [text, dim]) => {
+    const r = h('div', 'flex justify-between gap-3');
+    r.append(h('span', 'shrink-0 text-zinc-500', name), h('span', `text-right ${dim ? 'text-zinc-500' : 'text-emerald-600 dark:text-emerald-400'}`, text));
+    box.append(r);
+  };
+  line('Desktop app', vaultText(vi?.desktop, () => 'login cookie'));
+  line('Browser (claude.ai)', vaultText(vi?.browser, (v) => `${v.cookies} cookies`));
+  line('Claude Code CLI', ["can't be saved (run /login on the new laptop)", true]);
+  el.append(box);
+
   const actions = h('div', 'mt-4 flex flex-wrap gap-2');
   const btn = (text, cls, action, label, disabled = false, confirmText = '') => {
     const b = h('button', `${BTN} ${cls}`, text);
@@ -121,7 +163,7 @@ function card(a) {
       'vault',
       'Saved to Vault',
       a.status === 'busy',
-      `Save the minimum login data for "${a.label}" to the Vault?\n\nThis sends the desktop login cookie, and the browser session if there is one, to your local Vault. macOS will ask to allow Keychain access: click Allow.`,
+      `Save "${a.label}" to the Vault?\n\n- Desktop app: the login cookie (sessionKey)\n- Browser (claude.ai): the signed-in session, if there is one\n- Claude Code CLI: NOT saved (its login stays in this Mac's Keychain)\n\nmacOS will ask to allow Keychain access: click Allow.`,
     );
     btn('Run test task', 'text-xs text-zinc-500 hover:text-zinc-300', 'task', 'Task', !['ready', 'login_required'].includes(a.status));
     btn(
@@ -144,6 +186,12 @@ function render() {
 async function refresh() {
   try {
     accounts = await (await fetch('/api/accounts')).json();
+    for (const a of accounts) {
+      if (!(a.id in vaultInfo)) {
+        vaultInfo[a.id] = null; // placeholder so it loads once, not on every poll
+        loadVault(a.id);
+      }
+    }
     render();
   } catch {
     /* server restarting: next poll retries */

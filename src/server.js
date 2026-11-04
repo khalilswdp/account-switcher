@@ -402,10 +402,33 @@ async function saveToVault(id) {
   try {
     const desktop = await runScript('desktop-vault.mjs', ['push', id]); // may show the Keychain prompt
     const browser = await runScript('vault.mjs', ['push', id]);
-    return { desktop, browser };
+    const cli = {
+      ok: true,
+      message: 'not saved. Its login lives only in this Mac\'s Keychain, so run /login once on the new laptop.',
+    };
+    return { desktop, browser, cli };
   } finally {
     vaulting = false;
   }
+}
+
+// What is in the Vault for one account, per part. Counts and times only, never values.
+async function scriptStatus(script, id) {
+  const r = await runScript(script, ['status', id, '--json']);
+  if (!r.ok) return { state: 'blocked', message: r.message };
+  try {
+    return { state: 'ok', ...JSON.parse(r.message) };
+  } catch {
+    return { state: 'blocked', message: 'unexpected answer from the Vault helper' };
+  }
+}
+
+async function vaultStatus(id) {
+  const [desktop, browser] = await Promise.all([
+    scriptStatus('desktop-vault.mjs', id),
+    scriptStatus('vault.mjs', id),
+  ]);
+  return { desktop, browser, cli: { state: 'not_supported' } };
 }
 
 // -------------------------------------------------------------------- API
@@ -456,6 +479,7 @@ app.post('/api/desktop/switch/:name', async (req, res) => {
   if (!/^[\w-]+$/.test(req.params.name)) throw httpError(404, 'Invalid account name');
   res.json(await switchDesktop(req.params.name));
 });
+app.get('/api/accounts/:id/vault', async (req, res) => res.json(await vaultStatus(req.params.id)));
 app.post('/api/accounts/:id/vault', async (req, res) => res.json(await saveToVault(req.params.id)));
 app.post('/api/accounts/:id/cli', async (req, res) => res.json(await openCli(req.params.id)));
 app.post('/api/accounts/:id/reset', async (req, res) => res.json(await resetProfile(req.params.id)));

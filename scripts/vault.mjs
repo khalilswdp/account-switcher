@@ -77,11 +77,18 @@ const lastRev = (id) => fs.readFile(revFile(id), 'utf8').then((s) => s.trim(), (
 
 // ----------------------------------------------------------------- commands
 
-async function status(id) {
+async function status(id, asJson) {
   checkAccount(id);
   const local = await readLocal(id);
   const remote = await readRemote(id);
   const rev = await lastRev(id);
+  if (asJson) {
+    // counts and times only, for the dashboard
+    return console.log(JSON.stringify({
+      local: local ? { cookies: countCookies(local.state) } : null,
+      vault: remote ? { cookies: countCookies(remote.state), pushedAt: remote.pushedAt, host: remote.host } : null,
+    }));
+  }
   console.log(`[${id}]`);
   console.log(`  local  : ${local ? `${countCookies(local.state)} cookies` : 'no session backup'}`);
   console.log(`  vault  : ${remote ? `${countCookies(remote.state)} cookies, pushed ${remote.pushedAt} from ${remote.host}` : 'empty'}`);
@@ -140,7 +147,7 @@ const [cmd, id, ...rest] = process.argv.slice(2);
 const force = rest.includes('--force');
 try {
   if (cmd === 'status') {
-    for (const a of id ? [id] : ALLOWED.filter((x) => accountIds().includes(x))) await status(a);
+    for (const a of id ? [id] : ALLOWED.filter((x) => accountIds().includes(x))) await status(a, rest.includes('--json'));
   } else if (cmd === 'push') await push(id, force);
   else if (cmd === 'pull') await pull(id, force);
   else fail('usage: vault.mjs <status [id] | push <id> | pull <id>> [--force]');
