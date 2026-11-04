@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
     "vault": "node scripts/vault.mjs",
     "vault:local": "node scripts/vault-local.mjs",
     "desktop-vault": "node scripts/desktop-vault.mjs"

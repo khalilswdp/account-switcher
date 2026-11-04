@@ -106,6 +106,10 @@ async function push(id, force) {
   }
   const remote = await readRemote(id);
   const rev = await lastRev(id);
+  if (remote && !force && JSON.stringify(remote.state) === JSON.stringify(local.state)) {
+    await writeFile0600(revFile(id), remote.pushedAt);
+    return console.log(`Already up to date: nothing changed in "${id}" since ${remote.pushedAt}.`);
+  }
   if (remote && remote.pushedAt !== rev && !force) {
     fail(`the vault entry was updated (${remote.pushedAt} from ${remote.host}) since your last pull or push. Pull first, or use --force.`);
   }

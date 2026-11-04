@@ -24,6 +24,7 @@ import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
@@ -140,6 +141,39 @@ async function packItem(name, source, key) {
   return { kind: 'file', data: (await fs.readFile(p)).toString('base64') };
 }
 
+// A fingerprint of what would be pushed, taken from the still-encrypted source files, so
+// "nothing changed" can be detected without the Keychain key (no prompt, no new Vault version).
+async function fingerprint(source) {
+  const h = createHash('sha256');
+  h.update(JSON.stringify({ items: ITEMS, cookies: COOKIES }));
+  for (const name of ITEMS) {
+    const p = path.join(source, name);
+    if (!(await exists(p))) continue;
+    h.update(`\n${name}\n`);
+    if (name === 'Cookies') {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-vault-fp-'));
+      try {
+        const copy = path.join(dir, 'Cookies');
+        await fs.copyFile(p, copy);
+        const db = new DatabaseSync(copy, { readOnly: true });
+        const all = COOKIES.includes('*');
+        const rows = db
+          .prepare(`select host_key, name, path, hex(encrypted_value) as v from cookies ${all ? '' : `where name in (${COOKIES.map(() => '?').join(',')})`} order by host_key, name, path`)
+          .all(...(all ? [] : COOKIES));
+        for (const r of rows) h.update(`${r.host_key}|${r.name}|${r.path}|${r.v}\n`);
+        db.close();
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    } else if ((await fs.stat(p)).isDirectory()) {
+      for (const f of (await packDir(p)).files.sort((a, b) => a.path.localeCompare(b.path))) h.update(`${f.path}:${f.data}\n`);
+    } else {
+      h.update(await fs.readFile(p));
+    }
+  }
+  return h.digest('hex');
+}
+
 // ----------------------------------------------------------------- unpacking
 
 async function unpackItem(name, item, root, key) {
@@ -210,6 +244,11 @@ async function push(name, force) {
 
   const remote = await readRemote(name);
   const rev = await lastRev(name);
+  const fp = await fingerprint(source);
+  if (remote?.fp === fp && !force) {
+    await writeFile0600(revFile(name), remote.pushedAt);
+    return console.log(`Already up to date: nothing changed in "${name}" since ${remote.pushedAt}.`);
+  }
   if (remote && remote.pushedAt !== rev && !force) {
     fail(`the vault entry was updated (${remote.pushedAt} from ${remote.host}) since your last pull or push. Pull first, or use --force.`);
   }
@@ -230,6 +269,7 @@ async function push(name, force) {
     pushedAt,
     host: os.hostname(),
     items: Object.keys(items),
+    fp,
     payload: gzipSync(JSON.stringify(items)).toString('base64'),
   });
   if (envelope.length > MAX_ENTRY) fail(`the packed account is ${envelope.length} bytes, over the ${MAX_ENTRY} limit. Store fewer items (DESKTOP_ITEMS).`);

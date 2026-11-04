@@ -57,10 +57,12 @@ const when = (iso) => new Date(iso).toLocaleString([], { dateStyle: 'short', tim
 
 async function loadVault(id) {
   try {
-    vaultInfo[id] = await (await fetch(`/api/accounts/${id}/vault`)).json();
-  } catch {
-    const unavailable = { state: 'blocked', message: 'unavailable' };
-    vaultInfo[id] = { desktop: unavailable, browser: unavailable };
+    const res = await fetch(`/api/accounts/${id}/vault`);
+    if (res.status === 404) throw new Error('stale server'); // the page is newer than the server
+    vaultInfo[id] = await res.json();
+  } catch (e) {
+    const note = e.message === 'stale server' ? 'restart the dashboard server (Ctrl+C, npm start)' : 'unavailable';
+    vaultInfo[id] = { desktop: { state: 'blocked', message: note }, browser: { state: 'blocked', message: note } };
   }
   render();
 }
@@ -98,9 +100,9 @@ async function call(id, action, label) {
     } else if (action === 'cli') {
       log(`[${id}] Terminal opened with Claude Code (${body.command})`);
     } else if (action === 'vault') {
-      log(`[${id}] Vault, desktop app: ${body.desktop.message}`, !body.desktop.ok);
-      log(`[${id}] Vault, browser session: ${body.browser.message}`, !body.browser.ok);
-      log(`[${id}] Vault, Claude Code CLI: ${body.cli.message}`);
+      log(`[${id}] Vault, desktop app: ${body.desktop?.message ?? 'no answer'}`, !body.desktop?.ok);
+      log(`[${id}] Vault, browser session: ${body.browser?.message ?? 'no answer'}`, !body.browser?.ok);
+      log(`[${id}] Vault, Claude Code CLI: ${body.cli?.message ?? 'not saved (its login cannot be stored)'}`);
       loadVault(id);
     } else if (action === 'save') {
       log(`[${id}] Session saved`);

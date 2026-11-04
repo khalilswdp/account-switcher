@@ -10,6 +10,7 @@
 //   node scripts/vault-local.mjs backup <file> save a snapshot of everything (new-laptop move)
 //   node scripts/vault-local.mjs restore <file>  load a snapshot into a freshly initialised Vault
 //   node scripts/vault-local.mjs purge <entry> delete every version of one entry, e.g. desktop/test
+//   node scripts/vault-local.mjs trim [keep] [entry]   keep only the latest versions (default 2) of every entry
 //   node scripts/vault-local.mjs down          stop the container (data is kept)
 //
 // Secrets live in ~/.claude-switcher-vault (keys.json, token), owner-only, never in git.
@@ -110,6 +111,24 @@ async function unsealWith(key) {
   return (await res.json()).sealed === false;
 }
 
+// The Vault keeps a new version of an entry on every write. Old versions of a login cookie
+// are old secrets, so only the latest few are kept.
+const KEEP_VERSIONS = 2;
+const limitHistory = async (root, keep) =>
+  ok(await api('POST', 'secret/config', { token: root, json: { max_versions: keep } }), 'history setting');
+
+async function listEntries(root, prefix = '') {
+  const res = await api('GET', `secret/metadata/claude-switcher/${prefix}?list=true`, { token: root });
+  if (res.status === 404) return [];
+  await ok(res, 'listing');
+  const out = [];
+  for (const k of (await res.json()).data.keys) {
+    if (k.endsWith('/')) out.push(...(await listEntries(root, `${prefix}${k}`)));
+    else out.push(`${prefix}${k}`);
+  }
+  return out;
+}
+
 async function createScopedToken(rootToken) {
   const res = await api('POST', 'auth/token/create', {
     token: rootToken,
@@ -143,6 +162,7 @@ const commands = {
     // The store for the session envelopes (KV version 2) and a policy limited to our path.
     const mount = await api('POST', 'sys/mounts/secret', { token: root, json: { type: 'kv', options: { version: '2' } } });
     if (!mount.ok && mount.status !== 400) fail(`creating the secret/ store failed (HTTP ${mount.status})`);
+    await limitHistory(root, KEEP_VERSIONS);
     await ok(
       await api('PUT', `sys/policies/acl/${POLICY}`, {
         token: root,
@@ -217,12 +237,36 @@ const commands = {
     console.log('All versions permanently deleted.');
   },
 
+  // Cap the history for the whole store and for every entry already in it, and permanently
+  // destroy the versions beyond the cap. Optional second argument limits it to one entry.
+  async trim(keepArg, only) {
+    const keep = Math.max(1, Number(keepArg) || KEEP_VERSIONS);
+    const root = readKeys().root_token;
+    await limitHistory(root, keep);
+    for (const entry of only ? [only] : await listEntries(root)) {
+      const meta = await api('GET', `secret/metadata/claude-switcher/${entry}`, { token: root });
+      if (!meta.ok) continue;
+      const data = (await meta.json()).data;
+      await ok(await api('POST', `secret/metadata/claude-switcher/${entry}`, { token: root, json: { max_versions: keep } }), 'entry setting');
+      const live = Object.entries(data.versions)
+        .filter(([, v]) => !v.destroyed && !v.deletion_time)
+        .map(([n]) => Number(n))
+        .sort((a, b) => a - b);
+      const drop = live.slice(0, Math.max(0, live.length - keep));
+      if (drop.length) {
+        await ok(await api('POST', `secret/destroy/claude-switcher/${entry}`, { token: root, json: { versions: drop } }), 'destroy');
+      }
+      console.log(`claude-switcher/${entry}: kept ${live.length - drop.length} version(s), destroyed ${drop.length}.`);
+    }
+    console.log(`History cap is now ${keep} version(s) per entry.`);
+  },
+
   async down() {
     await docker('down');
     console.log('Vault stopped. Data is kept in the Docker volume.');
   },
 };
 
-const [cmd, arg] = process.argv.slice(2);
+const [cmd, arg, arg2] = process.argv.slice(2);
 if (!commands[cmd]) fail(`usage: vault-local.mjs <${Object.keys(commands).join('|')}>`);
-await commands[cmd](arg);
+await commands[cmd](arg, arg2);
