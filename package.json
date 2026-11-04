@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node src/server.js",
     "vault": "node scripts/vault.mjs",
-    "vault:local": "node scripts/vault-local.mjs"
+    "vault:local": "node scripts/vault-local.mjs",
+    "desktop-vault": "node scripts/desktop-vault.mjs"
   },
   "dependencies": {
     "express": "^5.3.0",
