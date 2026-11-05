@@ -71,6 +71,16 @@ not have permission to read this secret", because it is a folder, not a secret. 
 for the folder to show at the root. To use another Vault instead, set `VAULT_ADDR` and `VAULT_TOKEN`
 in `.env`.
 
+## Without Node: the PowerShell command (Windows)
+
+`ps\claude-switcher.ps1` does everything the dashboard does from the command line, with nothing
+installed beyond Windows, Docker and `claude`: same folders, same Vault entries, same backup files.
+See [ps/README.md](ps/README.md).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ps\claude-switcher.ps1 status
+```
+
 ## Everyday commands
 
 ```bash

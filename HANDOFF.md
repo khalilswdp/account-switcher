@@ -86,6 +86,7 @@ container `claude-switcher-vault-vault-1` runs Vault 2.2.1 with `restart: unless
 | `vault/docker-compose.yml` | Vault 2.2.1 (`VAULT_IMAGE` overrides), raft storage, `127.0.0.1:8200`, UI on |
 | `accounts.json` | The hand-edited accounts. Accounts added on the page or from the Vault go to the gitignored `.accounts.local.json` |
 | `README.md` | The short user-facing guide: run it, the Vault token and keys, everyday commands, where things are |
+| `ps/claude-switcher.ps1`, `ps/lib/*.ps1` | **The Windows-only PowerShell command** (2026-11-05): no Node, no npm. Same folders, state file, Vault envelopes, fingerprint and backup format as the Node code, checked by `test/powershell.test.mjs`. `lib/Native.ps1` is a C# block compiled on first use: SQLite through `winsqlite3.dll`, AES-256-GCM through CNG in chained calls (streaming), scrypt. `ps/README.md` explains the commands; `ps/selftest.ps1` checks the native pieces |
 
 Not in git: `.env`, `.backups/` (only the `.vault-rev` sync markers now), `.accounts.local.json`, and the
 leftovers of the browser part (`.profiles/`, `.state/`), which the user can delete. Outside the repo:
@@ -384,6 +385,64 @@ Windows:
   PowerShell's output to UTF-8 so paths with accents survive.
 - **A shell in the Code tab has no `USER`;** Node falls back to `os.userInfo()`. Tests set `USERPROFILE`
   as well as `HOME`, since `os.homedir()` reads the former on Windows.
+
+## The PowerShell command (Windows, no Node)
+
+Added on 2026-11-05 as an alternative path, by the user's choice over a single-exe build of the
+Node app. One entry script and nine library files, Windows PowerShell 5.1 syntax only (no `??`, no
+ternary, no `&&`), ASCII only in the sources. The contract with the Node code is the data: the
+Vault envelopes (`gzip-base64-json` for the app, `cli-keychain` for the CLI), the fingerprint (the
+JSON header string is built by hand so it is byte-identical to `JSON.stringify`), the `.csbk`
+layout, the folders and the state file. `test/powershell.test.mjs` enforces it on Windows: the
+same scratch folders switched by both, each side's app and CLI entries pulled and loaded by the
+other (real DPAPI keys made for the scratch folders, since the PowerShell side has no fake mode),
+`vault-list` equal from both, and each side's backup verified, inspected and applied by the other.
+Verified on the PC beyond the suite: `status` and `accounts` against the real folders (the app and
+its package folder found, the inside-the-app note shown). The run against the real Vault surfaced
+one bug, fixed: a `[string]` parameter defaulting to `$null` becomes `''`, so GET requests carried
+an empty body ("cannot send a content-body with this verb"). It could not then be re-checked:
+Docker Desktop's engine was not answering that morning (the Vault was down for the Node version
+too). Not verified: the HTTP path against a live Vault from PowerShell (`vault-list`, `vault
+status|up|unseal|init`), and a real switch, save or load through the PowerShell command (the suite
+covers the renames and the crypto; the quit, reopen and lock handling are the same calls the Node
+version makes). First thing to do when Docker is back: `ps\claude-switcher.ps1 vault unseal`, then
+`vault-list`.
+
+Things learned writing it, all costly to rediscover:
+- `Add-Type` uses the .NET Framework compiler: C# 5 only (no `out var`, no `$"..."`). The compiled
+  DLL is cached by source hash under `%LOCALAPPDATA%\claude-switcher` (a second run loads in 0.2 s).
+- CNG AES-GCM in chained calls needs a 16-byte IV buffer passed on every call (it keeps the counter
+  there; NULL is STATUS_INVALID_PARAMETER or an access violation), real buffers even for a zero-length
+  final call (a NULL output only reports a size and never finishes the tag), and the final call must
+  clear only the CHAIN_CALLS bit, keeping the IN_PROGRESS bit CNG set, or the tag covers the last piece
+  only. `pbMacContext` is 16 bytes for GCM.
+- .NET Framework's `Rfc2898DeriveBytes` refuses salts under 8 bytes, so scrypt carries its own PBKDF2.
+- A function that `return $list`s unrolls it: one row comes back as a bare dictionary, none as
+  `$null`. Return collections as `,$list` only where the caller needs the object (byte arrays, the
+  SQLite row list); elsewhere return plain arrays and have callers wrap with `@()`. Mixing the two
+  (`@(` around a `,$x` return) nests and miscounts.
+- Values that went through a pipeline (`Where-Object`, `ForEach-Object`) are PSObject-wrapped; a .NET
+  method taking `object[]` sees a PSObject, not a string. Unwrap with `.PSObject.BaseObject`.
+- `$HOME` is read-only: `$home = ...` throws. A dot-sourced file's `$script:X = $false` runs in the
+  entry script's scope and overwrites a parameter of the same name (`-Yes` arrived as false).
+- `Write-Host` goes to stdout when the process is redirected: progress lines use `[Console]::Error`.
+- `Remove-Item -Recurse` on a folder holding junctions can follow them in 5.1: junctions are deleted
+  with `[IO.Directory]::Delete` first.
+- Windows' `tar.exe` listing ends lines with CRLF; the Vault UI and PowerShell's web cmdlets want
+  `UseBasicParsing`; `-File` passes switches fine, `-Command` would not with the same quoting.
+- A `[string]` parameter defaulting to `$null` arrives as `''`: test with `-ne ''`, not `$null -ne`.
+- `@($null)` has one element: `@(Read-JsonFile $f | Where-Object { $null -ne $_ })` for a file that may
+  not exist, or the first `add` writes `[null, ...]` and the dashboard's startup throws on it.
+- `$LASTEXITCODE` does not exist until a native command ran; under strict mode reading it throws.
+- A `Process`'s `StandardInput` writer is built with `[Console]::InputEncoding`; with
+  `[Text.Encoding]::UTF8` (which carries a byte-order mark) three bytes reach the child before the
+  data, and `tar` says "Unrecognized archive format" on a stream that decrypts fine. Both console
+  encodings are set to `UTF8Encoding($false)`: no mark, and a piped passphrase with accents still
+  gives Node's bytes (the test covers an accented passphrase in both directions).
+- A script block passed down as a callback resolves variables dynamically, through the callee's
+  scope first: a `$fs` in the callee shadows the caller's. The decrypt loop takes a `Stream`, not a
+  block. A second review (2026-11-05) found the `$null` element, the exit-code read and the
+  passphrase encoding; all fixed the same day.
 
 ## How it is tested
 
