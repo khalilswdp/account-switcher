@@ -66,7 +66,8 @@ has none; `ps\selftest.ps1` checks it against the RFC's test vectors.
 - No page and no activity log: each command prints what it did, and the ones that quit the app,
   replace a login or delete something ask `[y/N]` first.
 - The removal dialog has no equivalent: `forget-app` and `forget-cli` delete Vault entries; folders
-  and backup files you delete yourself.
+  and backup files you delete yourself. A protected account (`PROTECTED_ACCOUNTS` in `.env`, `main`
+  by default) is refused by all three `forget` commands, as on the dashboard; `status` marks it.
 - `DESKTOP_ITEMS` other than `Cookies` (config.json, folders) are not supported.
 - Windows only. The Mac keeps the Node version; the Vault is what they share.
 

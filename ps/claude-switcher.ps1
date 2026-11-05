@@ -114,7 +114,7 @@ function Show-Status {
         $vault = $entries
     } catch { $vaultError = ($_.Exception.Message -replace '^Error:\s*', '') }
     if ($Json) {
-        $o = [ordered]@{ platform = 'win32'; insideApp = $inside; desktop = [ordered]@{ active = $state.active; running = $state.running; parked = @($state.parked) }; accounts = @($accounts | ForEach-Object { [ordered]@{ id = $_.id; label = $_.label; cliConfigDir = (Get-CliConfigDir $_.id); cliLogin = ($null -ne (Get-CliLoginInfo (Get-CliConfigDir $_.id))) } }); vault = $vault; vaultError = $vaultError; detected = (Get-DetectedAccount) }
+        $o = [ordered]@{ platform = 'win32'; insideApp = $inside; desktop = [ordered]@{ active = $state.active; running = $state.running; parked = @($state.parked) }; accounts = @($accounts | ForEach-Object { [ordered]@{ id = $_.id; label = $_.label; cliConfigDir = (Get-CliConfigDir $_.id); cliLogin = ($null -ne (Get-CliLoginInfo (Get-CliConfigDir $_.id))); protected = (Test-ProtectedAccount $_.id) } }); vault = $vault; vaultError = $vaultError; detected = (Get-DetectedAccount) }
         return ($o | ConvertTo-Json -Depth 6)
     }
     $lines = @()
@@ -132,7 +132,9 @@ function Show-Status {
             $v = ' | Vault: ' + (@(@('app', $vault[$a.id].desktop), @('cli', $vault[$a.id].cli)) | Where-Object { $_[1] } | ForEach-Object { $_[0] }) -join ', '
             if ($v -eq ' | Vault: ') { $v = ' | Vault: nothing' }
         } elseif ($vault) { $v = ' | Vault: nothing' }
-        $lines += ('Account      : ' + $a.id + ' (' + $a.label + ') Claude Code folder ' + $dir + ': ' + $login + $v)
+        $mark = ''
+        if (Test-ProtectedAccount $a.id) { $mark = ', protected' }
+        $lines += ('Account      : ' + $a.id + ' (' + $a.label + $mark + ') Claude Code folder ' + $dir + ': ' + $login + $v)
     }
     if ($vaultError) { $lines += ('Vault        : ' + $vaultError) } else {
         $onlyThere = @($vault.Keys | Where-Object { $k = $_; @($accounts | Where-Object { $_.id -eq $k }).Count -eq 0 })

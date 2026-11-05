@@ -405,7 +405,9 @@ Docker Desktop's engine was not answering that morning (the Vault was down for t
 too). Not verified: the HTTP path against a live Vault from PowerShell (`vault-list`, `vault
 status|up|unseal|init`), and a real switch, save or load through the PowerShell command (the suite
 covers the renames and the crypto; the quit, reopen and lock handling are the same calls the Node
-version makes). First thing to do when Docker is back: `ps\claude-switcher.ps1 vault unseal`, then
+version makes). Protected accounts are enforced in the library (`Assert-NotProtected` in
+`lib/Common.ps1`, called by the three `forget` functions; `status` marks them): added on 2026-11-05
+when a review on the Mac found the helper defined but never called. First thing to do when Docker is back: `ps\claude-switcher.ps1 vault unseal`, then
 `vault-list`.
 
 Things learned writing it, all costly to rediscover:

@@ -63,6 +63,7 @@ function Pull-CliLogin([string]$Name, [string]$ConfigDir = '', [switch]$Replace)
 
 function Forget-CliLogin([string]$Name) {
     Assert-AccountName $Name 'forget-cli'
+    Assert-NotProtected $Name
     $had = ($null -ne (Read-VaultEntry ('cli/' + $Name)))
     Remove-VaultEntry ('cli/' + $Name)
     $rev = Get-RevFile 'cli' $Name
@@ -74,6 +75,7 @@ function Forget-CliLogin([string]$Name) {
 # Deletes this machine's CLI login for the account (the file). The vault is not touched.
 function Remove-CliLoginLocal([string]$Name) {
     Assert-AccountName $Name 'forget-cli-local'
+    Assert-NotProtected $Name
     $dir = Get-CliConfigDir $Name
     if (-not (Get-CliLoginInfo $dir)) { return ('No CLI login on this machine for "' + $Name + '".') }
     Remove-CliLogin $dir

@@ -120,6 +120,13 @@ function Get-ProtectedAccounts {
     return @(((Get-Setting 'PROTECTED_ACCOUNTS' 'main') -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 
+function Test-ProtectedAccount([string]$Name) { return ((Get-ProtectedAccounts) -contains $Name) }
+
+# A protected account is never removed and nothing of its is ever deleted, here as on the dashboard.
+function Assert-NotProtected([string]$Name) {
+    if (Test-ProtectedAccount $Name) { Fail ('"' + $Name + '" is a protected account: it cannot be removed or deleted from (PROTECTED_ACCOUNTS in .env)') }
+}
+
 # ------------------------------------------------------------------- bytes
 
 function ConvertTo-Gzip([byte[]]$Bytes) {

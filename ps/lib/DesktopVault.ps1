@@ -340,6 +340,7 @@ function Load-DesktopLogin([string]$Name) {
 
 function Forget-DesktopLogin([string]$Name) {
     Assert-AccountName $Name 'forget-app'
+    Assert-NotProtected $Name
     $had = ($null -ne (Read-VaultEntry ('desktop/' + $Name)))
     Remove-VaultEntry ('desktop/' + $Name)
     $rev = Get-RevFile 'desktop' $Name

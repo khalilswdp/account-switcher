@@ -193,6 +193,20 @@ test('PowerShell command: app and Claude Code logins cross over with the Node sc
   assert.deepEqual(fromPs, JSON.parse(r.out));
   assert.doesNotMatch(JSON.stringify(fromPs), SECRETS);
 
+  // a protected account is never deleted from, as on the dashboard: all three forget commands refuse
+  const guarded = { ...env, PROTECTED_ACCOUNTS: 'fake' };
+  for (const cmd of ['forget-cli', 'forget-app', 'forget-cli-local']) {
+    r = await ps([cmd, 'fake', '-Yes'], { env: guarded });
+    assert.equal(r.code, 1, cmd);
+    assert.match(r.err, /protected/);
+  }
+  assert.equal(await exists(path.join(dir, 'vault', 'cli', 'fake.json')), true);
+  assert.equal(await exists(path.join(dir, 'vault', 'desktop', 'fake.json')), true);
+  assert.equal(await exists(path.join(dir, 'claude-fake', '.credentials.json')), true);
+  r = await ps(['status', '-Json'], { env: guarded });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(JSON.parse(r.out).accounts.find((a) => a.id === 'fake').protected, true);
+
   r = await ps(['forget-cli', 'fake', '-Yes'], { env });
   assert.match(r.out, /Deleted/);
   assert.equal(await exists(path.join(dir, 'vault', 'cli', 'fake.json')), false);
