@@ -327,6 +327,17 @@ Both systems:
   port 3000, found with `Get-NetTCPConnection -LocalPort 3000 -State Listen`).
 - **Right after an unseal the raft node is not yet active**, and the first write (creating the `secret/`
   store in `init`) fails with HTTP 500. `unsealWith` now waits for `sys/health` to report an active node.
+- **Docker Desktop will not start** (Windows, seen on 2026-10-28, 11-03 and 11-05, each after a reboot):
+  `docker version` never answers, `wsl --list --verbose` shows `docker-desktop` Stopped, and the backend
+  log (`%LOCALAPPDATA%\Docker\log\host\com.docker.backend.exe.log`) ends with `backend crashed: …
+  initializing Inference manager: listening on unix://…/Docker/run/dockerInference: remove …: Le système
+  ne peut pas accéder au fichier`, then the same for `%LOCALAPPDATA%\docker-secrets-engine\engine.sock`.
+  The UI only shows an error dialog (Quit / Reset to factory defaults: never the reset). Stale Unix-socket
+  files cannot be deleted on this Windows build (error 1920, even minutes-old ones, even through Win32
+  with the open-reparse-point flag), but their folders can be renamed: quit Docker Desktop (`Stop-Process`
+  on `Docker Desktop` and `com.docker*`), rename `%LOCALAPPDATA%\Docker\run` and
+  `%LOCALAPPDATA%\docker-secrets-engine` to `*.stale-<date>`, start `Docker Desktop.exe` again; the
+  engine answered 25 s later. Restarting Docker or WSL without the rename only repeats the crash.
 - **Chromium cookie timestamps overflow a JS number.** Read them with `setReadBigInts(true)`. Cookie DB
   version 24 prefixes the plaintext with `sha256(host_key)`. The test helper builds such a database.
 - **Vault 2.x** will not start with raft storage unless `disable_mlock` is set explicitly.
@@ -398,17 +409,21 @@ same scratch folders switched by both, each side's app and CLI entries pulled an
 other (real DPAPI keys made for the scratch folders, since the PowerShell side has no fake mode),
 `vault-list` equal from both, and each side's backup verified, inspected and applied by the other.
 Verified on the PC beyond the suite: `status` and `accounts` against the real folders (the app and
-its package folder found, the inside-the-app note shown). The run against the real Vault surfaced
-one bug, fixed: a `[string]` parameter defaulting to `$null` becomes `''`, so GET requests carried
-an empty body ("cannot send a content-body with this verb"). It could not then be re-checked:
-Docker Desktop's engine was not answering that morning (the Vault was down for the Node version
-too). Not verified: the HTTP path against a live Vault from PowerShell (`vault-list`, `vault
-status|up|unseal|init`), and a real switch, save or load through the PowerShell command (the suite
+its package folder found, the inside-the-app note shown). The first run against the real Vault
+surfaced one bug, fixed: a `[string]` parameter defaulting to `$null` becomes `''`, so GET requests
+carried an empty body ("cannot send a content-body with this verb"). On 2026-11-05, once Docker was
+back (see "Docker Desktop will not start" under the gotchas), the HTTP path against the live Vault was verified
+end to end from PowerShell: `vault up`, `vault unseal`, `vault status`, `vault backup` (a 23 KB raft
+snapshot), `vault-list`, `save-cli main` (a new version of the existing entry) and `load-cli main
+-Config <scratch folder>` (the 280-byte credentials file came back; the folder was deleted); Node's
+`vault:local status` and `vault-list` agree with it. Still not verified: `vault init` from
+PowerShell (the Vault was initialised by the Node command), and a real app switch, `save-app` or
+`load-app` through the PowerShell command, which need a window outside the Claude app (the suite
 covers the renames and the crypto; the quit, reopen and lock handling are the same calls the Node
-version makes). Protected accounts are enforced in the library (`Assert-NotProtected` in
-`lib/Common.ps1`, called by the three `forget` functions; `status` marks them): added on 2026-11-05
-when a review on the Mac found the helper defined but never called. First thing to do when Docker is back: `ps\claude-switcher.ps1 vault unseal`, then
-`vault-list`.
+version makes, which the user's save through the dashboard verified). Protected accounts are enforced
+in the library (`Assert-NotProtected` in `lib/Common.ps1`, called by the three `forget` functions;
+`status` marks them): added on 2026-11-05 when a review on the Mac found the helper defined but never
+called.
 
 Things learned writing it, all costly to rediscover:
 - `Add-Type` uses the .NET Framework compiler: C# 5 only (no `out var`, no `$"..."`). The compiled

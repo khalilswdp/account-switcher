@@ -24,7 +24,10 @@ npm run vault:local -- init     # first time only: makes the keys and the token 
 npm start                       # the dashboard, on http://127.0.0.1:3000
 ```
 
-After a reboot or a container restart the Vault is sealed: `npm run vault:local -- unseal`.
+After a reboot or a container restart the Vault is sealed: `npm run vault:local -- unseal`. If Docker
+Desktop itself never comes up after a reboot, its backend log (`%LOCALAPPDATA%\Docker\log\host\com.docker.backend.exe.log`
+on Windows) says why; on this PC stale socket files were the cause, and the fix is in HANDOFF.md under
+"Docker Desktop will not start".
 
 The first time, the page needs to know which account the Claude app is signed in as. It works that
 out by itself when it can (the app's data names its account, and one of your Claude Code logins is
